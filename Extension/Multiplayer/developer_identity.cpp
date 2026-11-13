@@ -1,3 +1,4 @@
+#include "Engine/Core/Platform/atomic_shared.h"
 #include "developer_identity.h"
 #include "Engine/Core/Json/json.h"
 #include "Extension/Multiplayer/Net/protocol.h"
@@ -20,7 +21,7 @@ constexpr auto servers = static_cast<std::size_t>(IdentityList::official_server)
 constexpr auto blocked = static_cast<std::size_t>(IdentityList::blocked_server);
 constexpr auto hosts = static_cast<std::size_t>(IdentityList::banned_host);
 
-std::atomic<std::shared_ptr<const IdentityLists>> current;
+dingosdk::atomic_shared_ptr<const IdentityLists> current;
 
 // A player's SteamID64 is 76561197960265728 plus a 32-bit account number, and
 // nobody has account 0. The API sends them as strings.

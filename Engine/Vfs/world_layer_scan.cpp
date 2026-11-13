@@ -166,7 +166,7 @@ std::string stamp(const fs::path& gameRoot) {
         const auto path = gameRoot / "Data" / fs::path(source.toc);
         std::error_code error;
         const auto size = fs::file_size(path, error);
-        const auto time = fs::last_write_time(path, error).time_since_epoch().count();
+        const auto time = static_cast<long long>(fs::last_write_time(path, error).time_since_epoch().count());
         out << ';' << source.toc << ':' << (error ? 0 : size) << ':' << (error ? 0 : time);
     }
     return out.str();
@@ -208,7 +208,7 @@ WorldLayerCatalog from_json(const Json& document) {
 WorldLayerCatalog scan(const fs::path& gameRoot) {
     struct Result { std::vector<Reference> references; std::set<std::string> shipped; };
     std::vector<std::future<Result>> pending;
-    std::vector<std::jthread> workers;
+    std::vector<std::thread> workers;
     pending.reserve(maps.size());
     workers.reserve(maps.size());
     // MSVC std::async schedules onto Windows' existing thread pool. During
@@ -230,6 +230,9 @@ WorldLayerCatalog scan(const fs::path& gameRoot) {
         const auto result = pending[i].get();
         add_map(catalog, maps[i].map, result.references, result.shipped);
     }
+    // std::jthread is missing from libc++ (Apple's and older LLVM), so the threads are joined here,
+    // where jthread's destructor would have done it.
+    for (auto& worker : workers) worker.join();
     return catalog;
 }
 

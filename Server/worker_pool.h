@@ -28,6 +28,8 @@ class WorkerPool {
             stopping_ = true;
         }
         wake_.notify_all();
+        // std::jthread's destructor did this; libc++ has no jthread, so it is explicit here.
+        for (auto &thread : threads_) thread.join();
     }
     WorkerPool(const WorkerPool &) = delete;
     WorkerPool &operator=(const WorkerPool &) = delete;
@@ -90,6 +92,6 @@ class WorkerPool {
     std::shared_ptr<Batch> batch_;
     std::uint64_t number_{};
     bool stopping_{};
-    std::vector<std::jthread> threads_; // last: joined before the rest goes
+    std::vector<std::thread> threads_; // last: joined before the rest goes
 };
 } // namespace dingosdk::server

@@ -49,7 +49,7 @@ std::uint64_t nonce() {
 }
 } // namespace
 
-Host::Host(ServerConfig &config, SteamTransport &transport, Log log)
+Host::Host(ServerConfig &config, Transport &transport, Log log)
     : config_(config), transport_(transport), log_(std::move(log)),
       activity_([this](const std::string &text) { if (config_.activity_log) log_(text); },
                 [this](std::uint64_t id) {
@@ -358,7 +358,10 @@ bool Host::start(std::string &error) {
         return false;
     }
     direct_port_ = 0;
-    if (!config_.use_steam_relay) {
+    if (transport_.is_lan()) {
+        direct_port_ = config_.port;
+        log_("Connection: LAN, on UDP port " + std::to_string(config_.port) + ". Players join this machine's address; no Steam and no relays.");
+    } else if (!config_.use_steam_relay) {
         const auto port = config_.port;
         if (transport_.listen_direct(port)) {
             direct_port_ = port;
@@ -2087,7 +2090,7 @@ void Host::tick(std::uint64_t now) {
     if (now_ >= next_relay_check_) {
         next_relay_check_ = now_ + 10000000;
         if (auto status = transport_.relay_status(); status != relay_status_) {
-            log_("[steam] Relay network: " + status);
+            if (!transport_.is_lan()) log_("[steam] Relay network: " + status);
             relay_status_ = std::move(status);
         }
     }

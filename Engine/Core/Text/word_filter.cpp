@@ -130,14 +130,19 @@ struct Sources {
 };
 std::mutex sources_mutex;
 Sources sources;
-std::atomic<std::shared_ptr<const Rules>> made;
+// Free-function atomics on a shared_ptr: std::atomic<shared_ptr> is an MSVC extension that libc++
+// (clang on Linux and macOS) does not provide.
+std::shared_ptr<const Rules> made;
 std::shared_ptr<const Rules> rules() {
-    auto current = made.load();
+    auto current = std::atomic_load_explicit(&made, std::memory_order_acquire);
     return current ? current : no_words();
 }
 void remake() {
     const bool backend = sources.given && sources.use_given;
-    if (!backend && sources.own_filtered.empty() && sources.own_forbidden.empty()) return made.store({});
+    if (!backend && sources.own_filtered.empty() && sources.own_forbidden.empty()) {
+        std::atomic_store_explicit(&made, std::shared_ptr<const Rules>{}, std::memory_order_release);
+        return;
+    }
     auto r = std::make_shared<Rules>();
     if (backend) {
         for (const auto& word : sources.given->first) add(r->filtered, word);
@@ -145,7 +150,7 @@ void remake() {
     }
     for (const auto& word : sources.own_filtered) add(r->filtered, word);
     for (const auto& word : sources.own_forbidden) add(r->filtered, word), add(r->forbidden, word);
-    made.store(std::shared_ptr<const Rules>(std::move(r)));
+    std::atomic_store_explicit(&made, std::shared_ptr<const Rules>(std::move(r)), std::memory_order_release);
 }
 
 // A word as folded letters, with where each letter sits in the text.

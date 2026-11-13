@@ -40,7 +40,8 @@ std::string fingerprint_of(const std::filesystem::path &directory) {
         const auto relative = std::filesystem::relative(it->path(), directory, entry).generic_u8string();
         add(std::string_view(reinterpret_cast<const char *>(relative.data()), relative.size()));
         add(std::to_string(it->file_size(entry)));
-        add(std::to_string(it->last_write_time(entry).time_since_epoch().count()));
+        // time_since_epoch().count() is __int128 under libc++, which to_string cannot take.
+        add(std::to_string(static_cast<long long>(it->last_write_time(entry).time_since_epoch().count())));
     }
     return std::format("{:016x}", hash);
 }

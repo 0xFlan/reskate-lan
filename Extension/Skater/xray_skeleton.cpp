@@ -1,3 +1,4 @@
+#include "Engine/Core/Platform/atomic_shared.h"
 #include "xray_skeleton.h"
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Game/Build/addresses.h"
@@ -66,7 +67,7 @@ std::vector<std::byte> chunk(const vfs::GameData& data, const vfs::GameBundle& b
 
 struct Loader {
     std::once_flag started;
-    std::atomic<std::shared_ptr<const SkeletonMesh>> mesh;
+    dingosdk::atomic_shared_ptr<const SkeletonMesh> mesh;
 };
 Loader& loader() { static auto* value = new Loader; return *value; }
 }

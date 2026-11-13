@@ -36,10 +36,14 @@ template<class T> T number(const Json& j, std::string_view key, T fallback = {})
         }
         return static_cast<T>(d);
     }
-    if (v->is_string() && std::is_integral_v<T>) {
-        T out{};
-        const auto& s = v->string();
-        if (std::from_chars(s.data(), s.data() + s.size(), out).ec == std::errc{}) return out;
+    // if constexpr: libc++'s from_chars has no floating-point overload, and this branch must not
+    // even be instantiated for a floating-point T.
+    if constexpr (std::is_integral_v<T>) {
+        if (v->is_string()) {
+            T out{};
+            const auto& s = v->string();
+            if (std::from_chars(s.data(), s.data() + s.size(), out).ec == std::errc{}) return out;
+        }
     }
     return fallback;
 }

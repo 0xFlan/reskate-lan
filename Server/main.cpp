@@ -2,6 +2,11 @@
 // in-game server browser. Runs from its own folder, next to steam_api64.dll and
 // the Steam client files (steamclient64.dll, tier0_s64.dll, vstdlib_s64.dll).
 // On Linux the Steam files are libsteam_api.so and steamclient.so.
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+#include "Extension/Multiplayer/Lan/lan_discovery.h"
+#include "Extension/Multiplayer/Lan/lan_transport.h"
 #include "Engine/Game/Build/supported_build.h"
 #include "global_bans.h"
 #include "server_map_update.h"
@@ -148,6 +153,15 @@ std::filesystem::path folder() {
     if (!length || length >= path.size()) throw std::runtime_error("Cannot find ReSkateServer.exe");
     path.resize(length);
     return std::filesystem::path(path).parent_path();
+#elif defined(__APPLE__)
+    // macOS has no /proc: ask dyld where this executable is (the buffer is a path, not a link).
+    std::uint32_t size = 4096;
+    std::string path(size, '\0');
+    if (_NSGetExecutablePath(path.data(), &size) != 0) {
+        path.assign(size, '\0');
+        if (_NSGetExecutablePath(path.data(), &size) != 0) throw std::runtime_error("Cannot find ReSkateServer");
+    }
+    return std::filesystem::canonical(path.c_str()).parent_path();
 #else
     char path[4096]{};
     const auto length = readlink("/proc/self/exe", path, sizeof(path) - 1);
@@ -372,12 +386,34 @@ int run(int argc, char **argv, bool skip_update) {
     // nobody is on). --no-update or "auto_update": false turns them off.
     remove_previous_update(here);
     bool auto_update = config.auto_update && updates_enabled() && !skip_update;
-    for (int i = 1; i < argc; ++i)
+    bool lan = false;     // --lan: no Steam at all; the session runs over plain UDP
+    bool lan_auto = false; // --lan-auto: only host if no other LAN server is already up
+    bool lan_list = false; // --lan-discover: list the LAN servers seen, then exit
+    for (int i = 1; i < argc; ++i) {
 #ifdef _WIN32
         if (std::wstring(argv[i]) == L"--no-update") auto_update = false;
+        if (std::wstring(argv[i]) == L"--lan") lan = true;
+        if (std::wstring(argv[i]) == L"--lan-auto") { lan = true; lan_auto = true; }
+        if (std::wstring(argv[i]) == L"--lan-discover") lan_list = true;
 #else
         if (std::string(argv[i]) == "--no-update") auto_update = false;
+        if (std::string(argv[i]) == "--lan") lan = true;
+        if (std::string(argv[i]) == "--lan-auto") { lan = true; lan_auto = true; }
+        if (std::string(argv[i]) == "--lan-discover") lan_list = true;
 #endif
+    }
+    if (lan_list) {
+        const auto found = multiplayer::LanDiscovery::discover(std::chrono::milliseconds(2000));
+        if (found.empty()) {
+            write_log("No LAN servers answered (nothing running on this network).");
+        } else {
+            write_log(std::to_string(found.size()) + " LAN server(s):");
+            for (const auto &server : found)
+                write_log("  " + server.name + " - " + server.address + ":" + std::to_string(server.port) + " - " +
+                          server.map + " - " + std::to_string(server.players) + "/" + std::to_string(server.max_players));
+        }
+        return 0;
+    }
     if (auto_update) {
         write_log("Checking for updates...");
         const auto check = check_for_update();
@@ -406,30 +442,60 @@ int run(int argc, char **argv, bool skip_update) {
 
     SteamServer steam;
     std::string error;
-    if (!steam.start(here, config.port, config.query_port, config.steam_token, error)) {
-        write_log(error);
-        return 1;
-    }
-    write_log(config.steam_token.empty() ? "Signing in to Steam..." : "Signing in to Steam with steam_token...");
-    const auto login_started = std::chrono::steady_clock::now();
-    while (!steam.logged_on() && !stopping) {
-        steam.run_callbacks();
-        if (std::chrono::steady_clock::now() - login_started > std::chrono::seconds(60)) {
-            write_log(config.steam_token.empty()
-                          ? "Steam sign-in timed out after 60 s. Check the internet connection and try again."
-                          : "Steam sign-in timed out after 60 s. Steam may not have accepted steam_token: it must be a token for "
-                            "app 3354750 that no other running server is using. Or check the internet connection.");
+    if (!lan) {
+        if (!steam.start(here, config.port, config.query_port, config.steam_token, error)) {
+            write_log(error);
             return 1;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        write_log(config.steam_token.empty() ? "Signing in to Steam..." : "Signing in to Steam with steam_token...");
+        const auto login_started = std::chrono::steady_clock::now();
+        while (!steam.logged_on() && !stopping) {
+            steam.run_callbacks();
+            if (std::chrono::steady_clock::now() - login_started > std::chrono::seconds(60)) {
+                write_log(config.steam_token.empty()
+                              ? "Steam sign-in timed out after 60 s. Check the internet connection and try again."
+                              : "Steam sign-in timed out after 60 s. Steam may not have accepted steam_token.");
+                return 1;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (stopping) return 0;
     }
-    if (stopping) return 0;
 
-    multiplayer::SteamTransport transport;
-    if (!transport.open_game_server(steam.module())) {
-        write_log("Steam networking failed: " + transport.status().detail);
-        return 1;
+    // The transport is the only thing down here that Steam owns: with --lan the session code above
+    // it runs over plain UDP and no Steam library is loaded at all.
+    std::unique_ptr<multiplayer::Transport> transport_storage;
+    if (lan) {
+        if (lan_auto) {
+            const auto already = multiplayer::LanDiscovery::discover(std::chrono::milliseconds(1500));
+            if (!already.empty()) {
+                const auto &first = already.front();
+                write_log("Another LAN server is already up: " + first.name + " on " + first.address + ":" +
+                          std::to_string(first.port) + " (" + std::to_string(first.players) + "/" +
+                          std::to_string(first.max_players) + "). Not starting a second one.");
+                return 0;
+            }
+            write_log("No LAN server answered: this machine will be the one.");
+        }
+        auto lan_transport = std::make_unique<multiplayer::LanTransport>(config.name.empty() ? "ReSkate LAN" : config.name);
+        if (!lan_transport->open(config.port)) {
+            write_log("Could not open UDP port " + std::to_string(config.port) + ".");
+            return 1;
+        }
+        transport_storage = std::move(lan_transport);
+        write_log("LAN mode: no Steam. Players reach this machine on UDP " + std::to_string(config.port) + ".");
+    } else {
+        auto steam_transport = std::make_unique<multiplayer::SteamTransport>();
+        if (!steam_transport->open_game_server(steam.module())) {
+            write_log("Steam networking failed: " + steam_transport->status().detail);
+            return 1;
+        }
+        transport_storage = std::move(steam_transport);
     }
+    multiplayer::Transport &transport = *transport_storage;
+    // Announce this server on the LAN, so a LAN party finds it without being told an address.
+    multiplayer::LanDiscovery discovery;
+    if (lan) discovery.advertise(config.name, config.map, config.port, config.max_players);
     // A check of another server's direct connections, from here: RESKATE_PROBE_DIRECT set to
     // "<its SteamID64>,<its address a.b.c.d>,<its port>". Signs in as this server would, connects
     // as a game does (the address first, Steam's relays after five seconds), says which it got,
@@ -445,7 +511,7 @@ int run(int argc, char **argv, bool skip_update) {
 #else
     if (const char *value = std::getenv("RESKATE_PROBE_DIRECT")) probe = value;
 #endif
-    if (!probe.empty()) {
+    if (!lan && !probe.empty()) {
         unsigned long long id{};
         unsigned port{};
         const auto first = probe.find(','), second = probe.find(',', first == std::string::npos ? 0 : first + 1);
@@ -495,11 +561,12 @@ int run(int argc, char **argv, bool skip_update) {
         return 1;
     }
     write_log(config.name + " is up on " + host.map_name() + " for " + std::to_string(config.max_players) + " players.");
-    write_log("Steam ID " + std::to_string(steam.steam_id()) +
-              (config.steam_token.empty() ? " (anonymous: new every start; set steam_token to keep one)" : " (from steam_token: the same every start)") +
-              ", public IP " + steam.public_ip() + ".");
+    if (!lan)
+        write_log("Steam ID " + std::to_string(steam.steam_id()) +
+                  (config.steam_token.empty() ? " (anonymous: new every start; set steam_token to keep one)" : " (from steam_token: the same every start)") +
+                  ", public IP " + steam.public_ip() + ".");
     write_log("Join code: " + host.invite() + (config.password.empty() ? "" : " (password required)"));
-    if (config.steam_token.empty() && config.listed)
+    if (!lan && config.steam_token.empty() && config.listed)
         write_log("No steam_token: the server browser can be set to show only servers that have one, and then "
                   "this server is not in it (players can still join with the code). It takes a minute to make "
                   "one: see steam_token in README.");
@@ -537,10 +604,10 @@ int run(int argc, char **argv, bool skip_update) {
     bool signed_in = true;
     auto next_sign_in_check = std::chrono::steady_clock::now();
     while (!stopping && !restart) {
-        steam.run_callbacks();
+        if (!lan) steam.run_callbacks();
         if (const auto now = std::chrono::steady_clock::now(); now >= next_sign_in_check) {
             next_sign_in_check = now + std::chrono::seconds(5);
-            if (const bool on = steam.logged_on(); on != signed_in) {
+            if (const bool on = lan ? true : steam.logged_on(); on != signed_in) {
                 signed_in = on;
                 write_log(on ? "[steam] Signed in to Steam again: players can join."
                              : "[steam] No longer signed in to Steam: players already on stay, but nobody can join until it is back. "
@@ -638,7 +705,7 @@ int run(int argc, char **argv, bool skip_update) {
             // The ReSkate team's rule, read with its ban list: say when it starts or stops hiding this server.
             if (const bool required = multiplayer::server_tokens_required(); required != tokens_required) {
                 tokens_required = required;
-                if (config.steam_token.empty() && config.listed)
+                if (!lan && config.steam_token.empty() && config.listed)
                     write_log(required ? "The server browser now shows only servers with a steam_token, so this server is "
                                          "hidden from it. Add a steam_token (see README) to be listed again."
                                        : "The server browser shows servers without a steam_token again.");
@@ -655,8 +722,9 @@ int run(int argc, char **argv, bool skip_update) {
                                             : "The server name is allowed again (the server is still set to unlisted).");
                 name_allowed = allowed;
             }
-            steam.advertise({config.name, host.map_name(), host.players(), config.max_players, !config.password.empty(),
+            if (!lan) steam.advertise({config.name, host.map_name(), host.players(), config.max_players, !config.password.empty(),
                              config.listed && allowed, host.secret(), host.direct_port()});
+            if (lan) discovery.update(host.players());
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }

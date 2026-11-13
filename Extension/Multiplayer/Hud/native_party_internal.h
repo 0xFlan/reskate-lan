@@ -1,4 +1,5 @@
 #pragma once
+#include "Engine/Core/Platform/atomic_shared.h"
 #include "native_party.h"
 #include "Engine/Game/Abi/native_data.h"
 #include "Engine/Core/Platform/memory.h"
@@ -122,7 +123,7 @@ struct State {
     std::atomic<bool> installed{};
     std::atomic<bool> roster_active{};
     std::atomic<bool> challenge_coop{}; // the last challenge started here runs coop (set_native_challenge_coop)
-    std::atomic<std::shared_ptr<const Published>> published;
+    dingosdk::atomic_shared_ptr<const Published> published;
     std::mutex position_mutex, status_mutex;
     std::array<Position, max_remote_players> positions;
     std::string status = "Native party: waiting for a lobby.";

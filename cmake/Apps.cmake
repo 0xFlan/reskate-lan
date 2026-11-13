@@ -272,6 +272,7 @@ else()
         Server/server_update.cpp Server/server_release.cpp Server/server_map_update.cpp Engine/Vfs/thunderstore_package.cpp
         Server/global_bans.cpp Server/server_words.cpp Extension/Multiplayer/developer_identity.cpp Extension/Multiplayer/word_lists.cpp
         Extension/Multiplayer/Steam/steam_transport.cpp Extension/Multiplayer/Net/protocol.cpp
+        Extension/Multiplayer/Lan/lan_transport.cpp Extension/Multiplayer/Lan/lan_discovery.cpp
         Extension/Multiplayer/Net/delta_codec.cpp Extension/Multiplayer/Net/wire_codec.cpp
         Extension/Multiplayer/Remote/playback_buffers.cpp Extension/Multiplayer/Session/password.cpp
         Server/server_activity.cpp Server/server_votes.cpp Server/server_commands.cpp Server/server_parks.cpp Extension/Throwdowns/throwdown_wire.cpp
@@ -280,4 +281,8 @@ else()
     target_link_libraries(dingosdk_server PRIVATE dingosdk_launcher_support dingosdk_world_layer_scan dingosdk_json
         dingosdk_lz4 dingosdk_zstd dingosdk_miniz dingosdk_word_filter OpenSSL::Crypto dingosdk_plugins dl pthread)
     set_target_properties(dingosdk_server PROPERTIES OUTPUT_NAME "ReSkateServer")
+
+    # A loopback check of the LAN transport: a host and a guest in one process, over 127.0.0.1.
+    add_executable(lan_loopback Extension/Multiplayer/Lan/lan_loopback.cpp Extension/Multiplayer/Lan/lan_transport.cpp)
+    target_include_directories(lan_loopback PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/External/steam_networking")
 endif()

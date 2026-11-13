@@ -1,3 +1,4 @@
+#include "Engine/Core/Platform/atomic_shared.h"
 #include "game_clips.h"
 #include "Engine/Resource/ebx_document.h"
 #include "Engine/Vfs/game_bundles.h"
@@ -690,7 +691,7 @@ Clip Library::load(std::string_view asked) const {
 namespace {
 struct Loader {
     std::once_flag started;
-    std::atomic<std::shared_ptr<const Library>> library;
+    dingosdk::atomic_shared_ptr<const Library> library;
     std::mutex mutex;
     std::string failure;
 };

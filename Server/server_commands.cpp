@@ -457,8 +457,9 @@ std::string Host::command(std::string_view line, std::uint64_t admin) {
         // bone-scale <1-8>|off: how far a mod may resize part of a skater for the other players.
         float value{};
         const bool off = argument == "off" || argument == "0";
-        const auto parsed = std::from_chars(argument.data(), argument.data() + argument.size(), value);
-        if (!off && (parsed.ec != std::errc{} || parsed.ptr != argument.data() + argument.size() || !(value >= 1.f && value <= 8.f)))
+        const auto parsed = parse_float(argument);
+        value = parsed.value;
+        if (!off && (!parsed.whole || !parsed.in_range || !(value >= 1.f && value <= 8.f)))
             return "bone-scale <1-8>|off: 1 shows every skater at the game's own proportions, off allows anything (now " +
                    (config_.bone_scale_limit >= 1.f ? std::to_string(config_.bone_scale_limit).substr(0, 4) : std::string("off")) + ")";
         config_.bone_scale_limit = off ? 0.f : value;
@@ -472,8 +473,9 @@ std::string Host::command(std::string_view line, std::uint64_t admin) {
     if (name == "bone-reach") {
         const bool off = argument == "off";
         float value{};
-        const auto parsed = std::from_chars(argument.data(), argument.data() + argument.size(), value);
-        if (!off && (parsed.ec != std::errc{} || parsed.ptr != argument.data() + argument.size() || !(value >= .5f && value <= 20.f)))
+        const auto parsed = parse_float(argument);
+        value = parsed.value;
+        if (!off && (!parsed.whole || !parsed.in_range || !(value >= .5f && value <= 20.f)))
             return "bone-reach <0.5-20>|off: how many metres a bone of a skater may be from the one it hangs from (now " +
                    (config_.bone_reach_limit > 0.f ? std::to_string(config_.bone_reach_limit).substr(0, 4) : std::string("off")) + ")";
         config_.bone_reach_limit = off ? 0.f : value;
@@ -559,8 +561,9 @@ std::string Host::command(std::string_view line, std::uint64_t admin) {
     }
     if (name == "voice-range") {
         float range{};
-        const auto result = std::from_chars(argument.data(), argument.data() + argument.size(), range);
-        if (result.ec != std::errc{} || result.ptr != argument.data() + argument.size() || !valid_voice_range(range))
+        const auto result = parse_float(argument);
+        range = result.value;
+        if (!result.whole || !result.in_range || !valid_voice_range(range))
             return "Choose a voice range from 50 to 1000 m.";
         config_.voice_range = range;
         return changed("Voice range set to " + std::to_string(static_cast<int>(range)) + " m.");

@@ -1,3 +1,4 @@
+#include "Engine/Core/Platform/atomic_shared.h"
 #include "trick_gestures.h"
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Resource/ebx_document.h"
@@ -25,7 +26,7 @@ constexpr std::string_view gesture_prefix = "gameplay/input/gestures/fliptricks/
 using Gestures = std::map<std::string, StickPath, std::less<>>;
 struct Loader {
     std::once_flag started;
-    std::atomic<std::shared_ptr<const Gestures>> gestures;
+    dingosdk::atomic_shared_ptr<const Gestures> gestures;
 };
 Loader &loader() {
     static auto *value = new Loader;

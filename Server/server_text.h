@@ -1,8 +1,10 @@
 #pragma once
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -12,6 +14,24 @@
 
 // Parsing helpers for console lines, admin requests and chat commands.
 namespace dingosdk::server {
+// A number parsed the way the console expects: libc++ has no floating-point from_chars, so this
+// goes through strtod and reports the same three things the call sites cared about.
+struct ParsedFloat {
+    float value{};
+    bool whole{};    // the whole word was the number
+    bool in_range{}; // it fit a float ("1e99" does not)
+};
+
+inline ParsedFloat parse_float(std::string_view word) {
+    const std::string copy(word);
+    char *end = nullptr;
+    errno = 0;
+    ParsedFloat parsed;
+    parsed.value = static_cast<float>(std::strtod(copy.c_str(), &end));
+    parsed.whole = !copy.empty() && end == copy.c_str() + copy.size();
+    parsed.in_range = errno != ERANGE;
+    return parsed;
+}
 inline std::string_view trim(std::string_view text) {
     const auto first = text.find_first_not_of(" \t");
     if (first == std::string_view::npos) return {};
@@ -104,10 +124,13 @@ inline std::string parse_teleport(std::string_view argument, TeleportRequest &ou
     auto rest = target;
     for (; numbers < 3 && !rest.empty(); ++numbers) {
         const auto [word, remaining] = split(rest);
-        const auto parsed = std::from_chars(word.data(), word.data() + word.size(), at[numbers]);
-        if (parsed.ptr != word.data() + word.size()) break;
-        if (parsed.ec == std::errc::result_out_of_range) at[numbers] = INFINITY; // "1e99": a number, and too far
-        else if (parsed.ec != std::errc{}) break;
+        // strtod rather than from_chars: libc++ has no floating-point from_chars.
+        const std::string copy(word);
+        char *end = nullptr;
+        errno = 0;
+        at[numbers] = static_cast<float>(std::strtod(copy.c_str(), &end));
+        if (end != copy.c_str() + copy.size()) break;
+        if (errno == ERANGE) at[numbers] = INFINITY; // "1e99": a number, and too far
         rest = remaining;
     }
     if (numbers == 3 && rest.empty()) {

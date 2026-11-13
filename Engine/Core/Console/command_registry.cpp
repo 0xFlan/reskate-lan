@@ -1,6 +1,10 @@
 #include "command_registry.h"
 #include "Engine/Core/Text/ascii.h"
 #include <array>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+#include <string>
 namespace dingosdk::console {
 std::vector<CompletionToken> completion_tokens(std::string_view input, int cursor) {
     const int size = static_cast<int>(input.size());
@@ -86,13 +90,22 @@ std::optional<Value> parse_value(Type type, std::string_view text) {
     }
     const auto parse = [&]<class T>() -> std::optional<Value> {
         T value{};
-        const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
-        if (result.ec != std::errc{} || result.ptr != text.data() + text.size())
-            return std::nullopt;
-        if constexpr (std::is_floating_point_v<T>)
-            if (!std::isfinite(value))
+        // libc++ (clang on Linux and macOS) has no floating-point from_chars, so numbers go through
+        // strtod there; the integer overloads are portable.
+        if constexpr (std::is_floating_point_v<T>) {
+            const std::string copy(text);
+            char *end = nullptr;
+            errno = 0;
+            value = static_cast<T>(std::strtod(copy.c_str(), &end));
+            if (errno != 0 || end != copy.c_str() + copy.size() || !std::isfinite(value))
                 return std::nullopt;
-        return value;
+            return value;
+        } else {
+            const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+            if (result.ec != std::errc{} || result.ptr != text.data() + text.size())
+                return std::nullopt;
+            return value;
+        }
     };
     switch (type) {
     case Type::integer:

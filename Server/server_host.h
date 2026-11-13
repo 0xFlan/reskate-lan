@@ -39,7 +39,7 @@ using namespace multiplayer;
 class Host {
   public:
     using Log = std::function<void(const std::string &)>;
-    Host(ServerConfig &config, SteamTransport &transport, Log log);
+    Host(ServerConfig &config, Transport &transport, Log log);
     // Opens the listener and starts a session under the given server identity.
     bool start(std::string &error);
     void tick(std::uint64_t now);
@@ -316,7 +316,7 @@ class Host {
     };
 
     ServerConfig &config_;
-    SteamTransport &transport_;
+    Transport &transport_;
     Log log_;
     bool map_update_requested_{};
     std::set<std::string> refused_plugins_;
