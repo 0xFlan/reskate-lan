@@ -27,7 +27,13 @@ constexpr unsigned max_tries = 10;
 constexpr std::uint64_t hello_every_us = 500'000;
 constexpr std::uint64_t peer_timeout_us = 10'000'000;
 
-enum class FrameType : std::uint8_t { hello = 1, welcome = 2, data = 3, acknowledgement = 4, bye = 5, ping = 6, pong = 7 };
+enum class FrameType : std::uint8_t {
+    hello = 1, welcome = 2, data = 3, acknowledgement = 4, bye = 5, ping = 6, pong = 7, fragment = 8
+};
+// A message has to fit one datagram at a time: a big one is split into fragments that all carry the
+// same sequence number, and put back together on the far side.
+constexpr std::size_t fragment_overhead = 8 + 4 + 2 + 2; // from id, sequence, index, count
+constexpr std::size_t chunk_size = max_datagram - header_size - fragment_overhead;
 constexpr std::uint8_t flag_reliable = 1;
 
 std::uint64_t now_us() {
@@ -90,6 +96,12 @@ struct LanTransport::Impl {
     std::uint64_t bytes_sent = 0, bytes_received = 0, messages_sent = 0, messages_received = 0;
     std::uint64_t last_status_us = 0;
 
+    // The fragments of one message, as they arrive. A message is only delivered once every part is in.
+    struct Assembly {
+        std::uint16_t count = 0;
+        std::uint16_t have = 0;
+        std::vector<std::vector<std::uint8_t>> parts;
+    };
     struct Peer {
         sockaddr_in address{};
         std::string name;
@@ -97,13 +109,14 @@ struct LanTransport::Impl {
         std::uint32_t send_seq_next = 1;
         std::uint32_t deliver_next = 1;
         std::map<std::uint32_t, std::vector<std::uint8_t>> waiting;
+        std::map<std::uint32_t, Assembly> assembling;
         std::int64_t pending = 0;
     };
     std::map<std::uint64_t, Peer> peers;
     struct Inflight {
         std::uint64_t peer = 0;
         std::uint32_t seq = 0;
-        std::vector<std::uint8_t> frame;
+        std::vector<std::vector<std::uint8_t>> frames;
         std::uint64_t sent_us = 0;
         unsigned tries = 0;
         std::size_t size = 0;
@@ -247,6 +260,22 @@ void LanTransport::stop() {
 void LanTransport::poll() {
     if (impl_->fd < 0 || !impl_->running) return;
 #ifndef _WIN32
+    const auto accept = [this](Impl::Peer &entry, std::uint64_t peer, std::uint32_t seq, const std::uint8_t *payload,
+                               std::size_t size) {
+        if (seq < entry.deliver_next) return;
+        if (seq == entry.deliver_next) {
+            impl_->deliver(peer, payload, size);
+            ++entry.deliver_next;
+            for (auto waiting = entry.waiting.find(entry.deliver_next); waiting != entry.waiting.end();
+                 waiting = entry.waiting.find(entry.deliver_next)) {
+                impl_->deliver(peer, waiting->second.data(), waiting->second.size());
+                entry.waiting.erase(waiting);
+                ++entry.deliver_next;
+            }
+        } else if (entry.waiting.size() < 256) {
+            entry.waiting[seq].assign(payload, payload + size);
+        }
+    };
     std::uint8_t buffer[max_datagram];
     for (;;) {
         sockaddr_in from{};
@@ -319,24 +348,52 @@ void LanTransport::poll() {
                 put_u64(ack, impl_->server ? 1 : impl_->my_id);
                 put_u32(ack, seq);
                 impl_->send_frame(from, ack);
-                if (seq >= entry.deliver_next) {
-                    const auto payload = buffer + at;
-                    const auto payload_size = static_cast<std::size_t>(received) - at;
-                    if (seq == entry.deliver_next) {
-                        impl_->deliver(peer, payload, payload_size);
-                        ++entry.deliver_next;
-                        for (auto waiting = entry.waiting.find(entry.deliver_next); waiting != entry.waiting.end();
-                             waiting = entry.waiting.find(entry.deliver_next)) {
-                            impl_->deliver(peer, waiting->second.data(), waiting->second.size());
-                            entry.waiting.erase(waiting);
-                            ++entry.deliver_next;
-                        }
-                    } else if (entry.waiting.size() < 256) {
-                        entry.waiting[seq].assign(buffer + at, buffer + received);
-                    }
-                }
+                accept(entry, peer, seq, buffer + at, static_cast<std::size_t>(received) - at);
             } else {
                 impl_->deliver(peer, buffer + at, static_cast<std::size_t>(received) - at);
+            }
+        } else if (type == FrameType::fragment) {
+            std::uint64_t from_id{};
+            std::uint32_t seq{};
+            if (!read_u64(buffer, static_cast<std::size_t>(received), at, from_id)) continue;
+            if (!read_u32(buffer, static_cast<std::size_t>(received), at, seq)) continue;
+            if (at + 4 > static_cast<std::size_t>(received)) continue;
+            const auto index = static_cast<std::uint16_t>(buffer[at] | (buffer[at + 1] << 8));
+            const auto count = static_cast<std::uint16_t>(buffer[at + 2] | (buffer[at + 3] << 8));
+            at += 4;
+            if (count == 0 || index >= count) continue;
+            const auto peer = impl_->server ? impl_->peer_at(from) : 1;
+            if (!peer) continue;
+            auto &entry = impl_->peers[peer];
+            entry.last_heard_us = now_us();
+            auto &assembly = entry.assembling[seq];
+            if (assembly.parts.empty()) {
+                assembly.count = count;
+                assembly.parts.resize(count);
+            }
+            if (assembly.count != count) {
+                entry.assembling.erase(seq);
+                continue;
+            }
+            if (assembly.parts[index].empty()) {
+                assembly.parts[index].assign(buffer + at, buffer + received);
+                ++assembly.have;
+            }
+            if (assembly.have != assembly.count) continue;
+            std::vector<std::uint8_t> whole;
+            for (const auto &part : assembly.parts) whole.insert(whole.end(), part.begin(), part.end());
+            entry.assembling.erase(seq);
+            // Acknowledge once the message is whole, so a lost fragment is asked for again rather than
+            // the sender being told the message arrived.
+            if (flags & flag_reliable) {
+                std::vector<std::uint8_t> ack;
+                impl_->frame_header(ack, FrameType::acknowledgement, 0);
+                put_u64(ack, impl_->server ? 1 : impl_->my_id);
+                put_u32(ack, seq);
+                impl_->send_frame(from, ack);
+                accept(entry, peer, seq, whole.data(), whole.size());
+            } else {
+                impl_->deliver(peer, whole.data(), whole.size());
             }
         } else if (type == FrameType::acknowledgement) {
             std::uint64_t peer{};
@@ -384,8 +441,10 @@ void LanTransport::poll() {
             it = impl_->inflight.erase(it);
             continue;
         }
-        if (const auto owner = impl_->peers.find(entry.peer); owner != impl_->peers.end())
-            impl_->send_frame(owner->second.address, entry.frame);
+        if (const auto owner = impl_->peers.find(entry.peer); owner != impl_->peers.end()) {
+            // Every fragment goes again: without the ones that were lost the message never completes.
+            for (const auto &frame : entry.frames) impl_->send_frame(owner->second.address, frame);
+        }
         entry.sent_us = now;
         ++entry.tries;
         ++it;
@@ -449,25 +508,55 @@ bool LanTransport::send(std::uint64_t id, std::span<const std::uint8_t> bytes, b
         address = impl_->server_address;
         id = 1;
     }
-    std::vector<std::uint8_t> frame;
-    impl_->frame_header(frame, FrameType::data, reliable ? flag_reliable : 0);
-    put_u64(frame, impl_->my_id);
-    std::uint32_t seq = 0;
+    std::vector<std::uint8_t> body;
+    put_u64(body, impl_->my_id);
     auto &peer = impl_->peers[id];
-    if (reliable) seq = peer.send_seq_next++;
-    put_u32(frame, seq);
-    frame.insert(frame.end(), bytes.begin(), bytes.end());
-    if (!impl_->send_frame(address, frame)) return false;
+    // A split message needs a sequence number even on the unreliable lane, to put its parts together.
+    const bool split = header_size + body.size() + 4 + bytes.size() > max_datagram;
+    std::uint32_t seq = 0;
+    if (reliable || split) seq = peer.send_seq_next++;
+    put_u32(body, seq);
+
+    std::vector<std::vector<std::uint8_t>> frames;
+    std::size_t total = 0;
+    if (!split) {
+        std::vector<std::uint8_t> frame;
+        impl_->frame_header(frame, FrameType::data, reliable ? flag_reliable : 0);
+        frame.insert(frame.end(), body.begin(), body.end());
+        frame.insert(frame.end(), bytes.begin(), bytes.end());
+        total = frame.size();
+        frames.push_back(std::move(frame));
+    } else {
+        const auto count = (bytes.size() + chunk_size - 1) / chunk_size;
+        if (count > 65535) return false;
+        for (std::size_t index = 0; index < count; ++index) {
+            std::vector<std::uint8_t> frame;
+            impl_->frame_header(frame, FrameType::fragment, reliable ? flag_reliable : 0);
+            frame.insert(frame.end(), body.begin(), body.end());
+            frame.push_back(static_cast<std::uint8_t>(index & 0xff));
+            frame.push_back(static_cast<std::uint8_t>((index >> 8) & 0xff));
+            frame.push_back(static_cast<std::uint8_t>(count & 0xff));
+            frame.push_back(static_cast<std::uint8_t>((count >> 8) & 0xff));
+            const auto offset = index * chunk_size;
+            const auto length = std::min(chunk_size, bytes.size() - offset);
+            frame.insert(frame.end(), bytes.begin() + offset, bytes.begin() + offset + length);
+            total += frame.size();
+            frames.push_back(std::move(frame));
+        }
+    }
+
+    for (const auto &frame : frames)
+        if (!impl_->send_frame(address, frame)) return false;
     ++impl_->messages_sent;
     if (reliable) {
         Impl::Inflight entry;
         entry.peer = id;
         entry.seq = seq;
-        entry.frame = std::move(frame); // the sent copy is the retransmit copy
+        entry.frames = std::move(frames); // the sent copies are the retransmit copies
         entry.sent_us = now_us();
         entry.tries = 1;
-        entry.size = frame.size();
-        peer.pending += static_cast<std::int64_t>(frame.size());
+        entry.size = total;
+        peer.pending += static_cast<std::int64_t>(total);
         impl_->inflight[std::make_pair(id, seq)] = std::move(entry);
     }
     return true;

@@ -94,6 +94,30 @@ int main() {
     check(guest.pending(1) == 0, "guest's reliable message was acknowledged (nothing in flight)");
     check(guest.status().connected, "guest is still connected well after the resend window");
 
+    // A message too big for one datagram is split up and put back together, on both lanes.
+    std::vector<std::uint8_t> big(40000);
+    for (std::size_t index = 0; index < big.size(); ++index) big[index] = static_cast<std::uint8_t>((index * 37 + 11) & 0xff);
+    const bool big_sent = guest.send(1, big, true, false, TrafficLane::control);
+    const bool big_unreliable_sent = guest.send(1, big, false, false, TrafficLane::gameplay);
+    std::vector<std::uint8_t> big_back;
+    std::vector<std::uint8_t> unreliable_back;
+    for (int i = 0; i < 300 && (big_back.empty() || unreliable_back.empty()); ++i) {
+        host.poll();
+        guest.poll();
+        guest.receive();
+        for (const auto &message : host.receive()) {
+            if (message.bytes != big) continue;
+            if (big_back.empty()) {
+                big_back = message.bytes;
+            } else {
+                unreliable_back = message.bytes;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(big_sent && big_back == big, "a message larger than one datagram arrives whole");
+    check(big_unreliable_sent && unreliable_back == big, "a large unreliable message arrives whole too");
+
     // A disconnect is told to the other side, and shows up as a closed connection.
     host.disconnect(guest_id, "closing");
     for (int i = 0; i < 100 && !guest_saw_close; ++i) {

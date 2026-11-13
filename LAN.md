@@ -35,15 +35,16 @@ hand out; players see the server in the game's LAN list.
 cmake --build <build> --target lan_loopback && ./lan_loopback
 ```
 
-Sixteen checks cover the handshake, both lanes, peer naming, acknowledgement (a reliable message
-must be acknowledged rather than resent until the peer drops), clean disconnects, and the reason a
-peer was told why it was closed.
+Eighteen checks cover the handshake, both lanes, peer naming, acknowledgement (a reliable message
+must be acknowledged rather than resent until the peer drops), messages larger than one datagram
+being split and put back together on both lanes, clean disconnects, and the reason a peer was told
+why it was closed.
 
 ## Limits
 
 - Both ends must run this fork: stock ReSkate speaks Steam's protocol and the two cannot talk.
 - No peer authentication. Anyone who can reach the port can join, which is fine on a home LAN and
   not fine on a shared network.
-- `send_rate` is not enforced and frames above one datagram are not fragmented yet.
+- `send_rate` is not enforced: a LAN has no relay to protect, so the transport sends as fast as it is given.
 - AI skaters (`reskate.ai`) are refused inside a session by ReSkate itself, so bots and LAN play do
   not combine.
