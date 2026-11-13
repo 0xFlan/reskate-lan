@@ -34,3 +34,6 @@ __pycache__/
 # vtf's linux development configuration
 .vscode/
 .clangd
+# LAN pack output: built artifacts, shipped in a release rather than committed
+/dist/bin/
+/dist/*.zip

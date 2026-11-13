@@ -1,0 +1,62 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    # The LAN client is the Windows runtime: ReSkate.dll is what a player's game loads, so this job
+    # is the one that produces the half of the pack macOS cannot build.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset vs2022-x64
+      - name: Build
+        run: cmake --build --preset release --parallel 4
+      - name: LAN loopback test
+        run: .\build\vs2022-x64\Release\lan_loopback.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reskate-lan-windows
+          path: |
+            build/vs2022-x64/Release/ReSkate.dll
+            build/vs2022-x64/Release/ReSkateLauncher.exe
+            build/vs2022-x64/Release/ReSkateServer.exe
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: OpenSSL headers
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Configure
+        run: cmake --preset linux-x64
+      - name: Build
+        run: cmake --build build/linux --target dingosdk_server lan_loopback -j4
+      - name: LAN loopback test
+        run: ./build/linux/lan_loopback
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reskate-lan-linux
+          path: build/linux/ReSkateServer
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: OpenSSL
+        run: brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+      - name: Configure
+        run: cmake -S . -B build/macos -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+      - name: Build
+        run: cmake --build build/macos --target dingosdk_server lan_loopback -j4
+      - name: LAN loopback test
+        run: ./build/macos/lan_loopback
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reskate-lan-macos
+          path: build/macos/ReSkateServer

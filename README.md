@@ -3,6 +3,10 @@
 play it offline, host your own lobbies and dedicated servers, and mod it.
 the launcher, the runtime that loads into the game, and the dedicated server.
 
+> **This fork** adds Steam-free LAN play, so a LAN party needs no Steam account, relay or
+> internet: see [LAN.md](LAN.md). It is not the upstream project, and a LAN build can only
+> play with other LAN builds.
+
 > ReSkate is a fan project. It is not affiliated with or endorsed by Electronic Arts or Full Circle.
 > You need your own copy of skate. on Steam.
 
