@@ -4,6 +4,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # Engine/Core/Platform/atomic_shared.h wraps the standard free-function atomics on a shared_ptr
+    # because std::atomic<shared_ptr> is an MSVC extension that clang and GCC reject. MSVC's C++20
+    # STL deprecates that portable form; the project keeps it, so its warning is not acted on.
+    add_compile_definitions(_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING)
 endif()
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
