@@ -348,7 +348,13 @@ void ServerEngine::run_startup() {
                 "this server is not in it (players can still join with the code). It takes a minute to make "
                 "one: see steam_token in README.", LogLevel::warning);
         }
-        log("Join code: " + host_->invite() + (config_.password.empty() ? "" : " (password required)"), LogLevel::success);
+        // A LAN server has no join code to paste: its address is the way in.
+        if (transport_->is_lan())
+            log("LAN: players join this machine on UDP " + std::to_string(config_.port) +
+                    (config_.password.empty() ? "." : " (password required)."),
+                LogLevel::success);
+        else
+            log("Join code: " + host_->invite() + (config_.password.empty() ? "" : " (password required)"), LogLevel::success);
         {
             // Admins are a role now (roles.h): the players whose role has every command.
             std::size_t admins{};

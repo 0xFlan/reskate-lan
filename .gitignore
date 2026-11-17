@@ -37,3 +37,4 @@ __pycache__/
 # LAN pack output: built artifacts, shipped in a release rather than committed
 /dist/bin/
 /dist/*.zip
+/dist/LICENSE

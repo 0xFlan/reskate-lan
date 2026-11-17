@@ -565,7 +565,13 @@ int run(int argc, char **argv, bool skip_update) {
         write_log("Steam ID " + std::to_string(steam.steam_id()) +
                   (config.steam_token.empty() ? " (anonymous: new every start; set steam_token to keep one)" : " (from steam_token: the same every start)") +
                   ", public IP " + steam.public_ip() + ".");
-    write_log("Join code: " + host.invite() + (config.password.empty() ? "" : " (password required)"));
+    // A join code names a Steam session; on a LAN the address is the way in, and saying otherwise
+    // sends people looking for somewhere to paste a code that means nothing to them.
+    if (lan)
+        write_log("LAN: players join this machine on UDP " + std::to_string(config.port) +
+                  (config.password.empty() ? "." : " (password required)."));
+    else
+        write_log("Join code: " + host.invite() + (config.password.empty() ? "" : " (password required)"));
     if (!lan && config.steam_token.empty() && config.listed)
         write_log("No steam_token: the server browser can be set to show only servers that have one, and then "
                   "this server is not in it (players can still join with the code). It takes a minute to make "
@@ -584,6 +590,8 @@ int run(int argc, char **argv, bool skip_update) {
     timeBeginPeriod(1);
 #endif
     auto next_advertise = std::chrono::steady_clock::now();
+    // The count the LAN beacon carries, read with the rest of what is advertised.
+    unsigned lan_players = 0;
     std::optional<bool> name_allowed; // last seen: whether the name may be listed
     bool tokens_required{};           // last seen: whether the browser wants a steam_token
     auto next_update_check = next_advertise + update_interval;
@@ -724,8 +732,12 @@ int run(int argc, char **argv, bool skip_update) {
             }
             if (!lan) steam.advertise({config.name, host.map_name(), host.players(), config.max_players, !config.password.empty(),
                              config.listed && allowed, host.secret(), host.direct_port()});
-            if (lan) discovery.update(host.players());
+            if (lan) lan_players = host.players();
         }
+        // The beacon goes out every half second (LanDiscovery throttles this call), not with the
+        // two-second Steam advertisement: a client listening for a second and a half has to be sure
+        // of hearing a server that is up, wherever in the half second it started listening.
+        if (lan) discovery.update(lan_players);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 #ifdef _WIN32

@@ -41,6 +41,8 @@ jobs:
         run: cmake --build build/linux --target dingosdk_server lan_loopback -j4
       - name: LAN loopback test
         run: ./build/linux/lan_loopback
+      - name: LAN discovery smoke test
+        run: ./dist/smoke-lan.sh ./build/linux/ReSkateServer
       - uses: actions/upload-artifact@v4
         with:
           name: reskate-lan-linux
@@ -58,6 +60,8 @@ jobs:
         run: cmake --build build/macos --target dingosdk_server lan_loopback -j4
       - name: LAN loopback test
         run: ./build/macos/lan_loopback
+      - name: LAN discovery smoke test
+        run: ./dist/smoke-lan.sh ./build/macos/ReSkateServer
       - uses: actions/upload-artifact@v4
         with:
           name: reskate-lan-macos
