@@ -8,10 +8,11 @@
 
 namespace dingosdk::multiplayer {
 // A transport for people on the same network, with no Steam anywhere: plain UDP on one port, a
-// three-packet handshake that hands out peer numbers, and the same contract SteamTransport
-// satisfies (Net/transport.h). Reliable messages are acknowledged and resent, and are delivered
-// in order; unreliable ones go once. There is no relaying and no auth: anyone who can reach the
-// port can ask to join, which is what makes it a LAN transport.
+// handshake that hands out peer numbers, and the same contract SteamTransport satisfies
+// (Net/transport.h). Reliable messages are acknowledged and resent, and are delivered in order;
+// unreliable ones go once. There is no relaying. A host may demand a password: it challenges with a
+// nonce and the guest proves the password over it, and until then the host gives that address no
+// peer number at all, so an unauthenticated peer is not in the session and nothing of it is read.
 class LanTransport final : public Transport {
   public:
     // `player_name` is what other players see; the host shows it in its player list.
@@ -47,6 +48,12 @@ class LanTransport final : public Transport {
     bool listen_direct(std::uint16_t) override { return false; }
     void allow_peers(std::span<const Member>) override {}
     void connect_peer(std::uint64_t) {}
+
+    // The password a host demands of everyone joining, or the one a guest proves. "" is none; the
+    // handshake then works as it always did. 1-64 bytes, as a lobby password.
+    bool set_password(std::string_view password, bool hosting) override;
+    // The host's reason the join was refused (a wrong password, or that one is needed), once.
+    std::string take_join_refusal() override;
 
     // The port actually bound, for a log line or a join code.
     std::uint16_t port() const { return port_; }

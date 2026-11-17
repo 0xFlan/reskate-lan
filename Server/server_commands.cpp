@@ -330,6 +330,8 @@ std::string Host::command(std::string_view line, std::uint64_t admin) {
         config_.password = argument == "off" ? std::string{} : std::string(argument);
         erase_key(password_);
         password_ = config_.password.empty() ? std::nullopt : password_key(config_.password, secret_);
+        // The LAN handshake demands it too, from the next hello on (Host::start does this at boot).
+        if (transport_.is_lan()) transport_.set_password(config_.password, true);
         return changed(config_.password.empty() ? "Password removed. Anyone can join."
                                                 : "Password set. Players already here stay; new ones need it.");
     }

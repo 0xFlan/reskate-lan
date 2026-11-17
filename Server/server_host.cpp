@@ -383,6 +383,9 @@ bool Host::start(std::string &error) {
     world_ = 1;
     map_ = map_hash(map_destination(config_.map));
     password_ = config_.password.empty() ? std::nullopt : password_key(config_.password, secret_);
+    // A LAN transport authenticates the connection itself, so the password goes to it as well: a peer
+    // that has not proved it never gets a peer number, and never reaches the session at all.
+    if (transport_.is_lan()) transport_.set_password(config_.password, true);
     voice_policy_ = {config_.voice_chat, 1};
     apply_layers();
     // The threads that share each pass's sending with this one ("threads": this many in all;

@@ -414,6 +414,15 @@ void networking(Session &s, const NativeFrame &local, std::uint64_t now) {
     for (auto &peer : active_peers(s))
         if (!peer.chat_waiting.empty()) release_chat(s, peer, now, false);
     s.transport.poll();
+    // A LAN host that will not have this player says so over the connection itself: the player is
+    // told its reason (a wrong password, or that one is needed) rather than left on a join that never
+    // started.
+    if (s.mode == Mode::join && s.transport.is_lan()) {
+        if (const auto refused = s.transport.take_join_refusal(); !refused.empty()) {
+            stop(s, refused);
+            return;
+        }
+    }
     if (s.mode == Mode::join && s.transport.status().telemetry) {
         const auto &t = s.transport.status();
         const auto peers = active_peers(s);
@@ -449,7 +458,11 @@ void networking(Session &s, const NativeFrame &local, std::uint64_t now) {
             }
         }
     }
-    if (s.mode == Mode::join && physical(s.host_id) == links.end()) {
+    // A LAN join has to finish its handshake before it has a host link to lose: until the transport
+    // says it is connected, a missing link is a dial still going on, not a disconnect. The join
+    // timeout, and the host's own refusal, are what end that wait.
+    const bool lan_dialling = s.transport.is_lan() && !s.transport.status().connected;
+    if (s.mode == Mode::join && !lan_dialling && physical(s.host_id) == links.end()) {
         // What the other end said as it closed the link, when it was said to this player
         // ("You were kicked...", "You are banned...", "Your mods..."), is put in front of
         // them (take_removed_notice): otherwise it is only the status line of a menu they

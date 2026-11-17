@@ -15,9 +15,10 @@ const Transport &SessionTransport::active() const {
     return lan_ ? static_cast<const Transport &>(lan_->transport()) : static_cast<const Transport &>(*steam_);
 }
 
-bool SessionTransport::use_lan(std::string player_name, std::string_view endpoint, std::string &error) {
+bool SessionTransport::use_lan(std::string player_name, std::string_view endpoint, std::string_view password,
+                               std::string &error) {
     auto client = std::make_unique<LanClient>(std::move(player_name));
-    if (!client->join(endpoint)) {
+    if (!client->join(endpoint, password)) {
         error = client->error();
         return false;
     }
@@ -94,4 +95,10 @@ void SessionTransport::set_packing(unsigned milliseconds) { active().set_packing
 bool SessionTransport::listen_direct(std::uint16_t port) { return lan_ ? false : steam_->listen_direct(port); }
 
 void SessionTransport::allow_peers(std::span<const Member> members) { active().allow_peers(members); }
+
+bool SessionTransport::set_password(std::string_view password, bool hosting) {
+    return active().set_password(password, hosting);
+}
+
+std::string SessionTransport::take_join_refusal() { return active().take_join_refusal(); }
 } // namespace dingosdk::multiplayer

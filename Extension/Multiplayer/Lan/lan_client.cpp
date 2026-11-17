@@ -70,17 +70,23 @@ bool LanClient::parse_endpoint(std::string_view endpoint, std::uint32_t &network
     return true;
 }
 
-bool LanClient::join(std::string_view endpoint) {
+bool LanClient::join(std::string_view endpoint, std::string_view password) {
     endpoint_.assign(endpoint);
     error_.clear();
     std::uint32_t ip{};
     std::uint16_t port{};
     if (!parse_endpoint(endpoint, ip, port, error_)) return false;
-    return join_at(ip, port);
+    return join_at(ip, port, password);
 }
 
-bool LanClient::join_at(std::uint32_t network_order, std::uint16_t port) {
+bool LanClient::join_at(std::uint32_t network_order, std::uint16_t port, std::string_view password) {
     error_.clear();
+    // Before the dial: the handshake's first hello is answered with a challenge when the host has a
+    // password, and this side has to be able to answer it at once.
+    if (!transport_.set_password(password, false)) {
+        error_ = "That password cannot be used: a server password is 1-64 characters.";
+        return false;
+    }
     if (!transport_.join(0, network_order, port)) {
         error_ = "Could not open a UDP socket to reach " + (endpoint_.empty() ? std::string("that address") : endpoint_) + ".";
         return false;

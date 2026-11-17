@@ -1,6 +1,8 @@
 // First, so WinSock is declared before any other header can bring in windows.h.
 #include "lan_socket.h"
 #include "lan_transport.h"
+#include "Extension/Multiplayer/Lan/lan_session.h"
+#include "Extension/Multiplayer/Session/password.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -8,6 +10,9 @@
 #include <deque>
 #include <iterator>
 #include <map>
+#include <optional>
+#include <random>
+#include <string_view>
 #include <utility>
 
 namespace dingosdk::multiplayer {
@@ -32,7 +37,11 @@ constexpr unsigned max_datagrams_per_poll = 256;
 constexpr std::size_t max_assemblies = 8;
 
 enum class FrameType : std::uint8_t {
-    hello = 1, welcome = 2, data = 3, acknowledgement = 4, bye = 5, ping = 6, pong = 7, fragment = 8
+    hello = 1, welcome = 2, data = 3, acknowledgement = 4, bye = 5, ping = 6, pong = 7, fragment = 8,
+    // A host with a password answers a hello with a challenge and its nonce, and the guest answers
+    // that with its proof. A host without one never sends either, so an open server's handshake is
+    // the three frames it always was.
+    challenge = 9, authenticate = 10
 };
 // A message has to fit one datagram at a time: a big one is split into fragments that all carry the
 // same sequence number, and put back together on the far side.
@@ -81,6 +90,26 @@ bool read_text(const std::uint8_t *data, std::size_t size, std::size_t &at, std:
 bool same_address(const sockaddr_in &a, const sockaddr_in &b) {
     return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
 }
+
+// What a guest proves when the host has a password: it knows the key the password derives, over both
+// nonces, so the proof is good for this handshake and no other. A message of its own (the session
+// id is fixed), so a session's own proof can never be replayed as a handshake's.
+PasswordKey handshake_proof(const PasswordKey &key, std::uint64_t guest_nonce, std::uint64_t host_nonce) {
+    return password_proof(key, lan_session_secret, guest_nonce, host_nonce, 0, 0, 0, 0);
+}
+
+std::uint64_t random_nonce() {
+    static std::mt19937_64 generator{std::random_device{}()};
+    const auto value = generator();
+    return value ? value : 1;
+}
+
+// The address as a player would type it, for a refusal that says what to retry with.
+std::string endpoint_text(std::uint32_t network_order, std::uint16_t port) {
+    const auto ip = ntohl(network_order);
+    return std::to_string((ip >> 24) & 0xff) + "." + std::to_string((ip >> 16) & 0xff) + "." +
+           std::to_string((ip >> 8) & 0xff) + "." + std::to_string(ip & 0xff) + ":" + std::to_string(port);
+}
 } // namespace
 
 struct LanTransport::Impl {
@@ -89,12 +118,45 @@ struct LanTransport::Impl {
     bool running = false;
     bool connected = false;
     std::uint64_t my_id = 0;
-    std::uint64_t next_peer_id = 2;
+    std::uint64_t next_peer_id = lan_host_peer + 1;
     std::uint32_t next_seq = 1;
     sockaddr_in server_address{};
     bool have_server_address = false;
     std::uint64_t last_hello_us = 0;
     bool hello_sent = false;
+    // The password this side demands (a host) or proves (a guest), and where the handshake stands.
+    std::optional<PasswordKey> password;
+    bool require_password = false;
+    std::uint64_t guest_nonce = 0, host_nonce = 0;
+    bool challenged = false;
+    std::string join_refusal;
+    std::string server_text; // what a player typed, for a refusal that says what to retry with
+    // A host keeps each unproven address's nonces and name until it proves the password. No peer
+    // number is handed out before then, so such a peer is not in the session at all.
+    struct PendingAuth {
+        std::string name;
+        std::uint64_t guest_nonce{}, host_nonce{}, since_us{};
+    };
+    std::map<std::pair<std::uint32_t, std::uint16_t>, PendingAuth> pending_auth;
+    static std::pair<std::uint32_t, std::uint16_t> address_key(const sockaddr_in &address) {
+        return {address.sin_addr.s_addr, address.sin_port};
+    }
+    // Gives up on the join, keeping the reason for the session to read and tell the player.
+    void refuse(std::string reason) {
+        join_refusal = std::move(reason);
+        closed[lan_host_peer] = join_refusal;
+        running = false;
+        connected = false;
+        challenged = false;
+        peers.clear();
+        inflight.clear();
+        if (fd != lan_no_socket) {
+            lan_socket_close(fd);
+            fd = lan_no_socket;
+        }
+        refresh_status();
+        status.detail = join_refusal;
+    }
     std::uint64_t ping_sent_us = 0;
     int ping_ms = 0;
     std::uint64_t bytes_sent = 0, bytes_received = 0, messages_sent = 0, messages_received = 0;
@@ -172,7 +234,7 @@ struct LanTransport::Impl {
         status.hosting = server && running;
         status.connected = connected;
         status.local_id = my_id;
-        status.peer_id = server ? 0 : 1;
+        status.peer_id = server ? 0 : lan_host_peer;
         status.peers.clear();
         for (const auto &[id, peer] : peers) status.peers.push_back({id, true});
         status.ping_ms = ping_ms;
@@ -182,7 +244,10 @@ struct LanTransport::Impl {
         status.received_bytes = bytes_received;
         status.pending_bytes = 0;
         for (const auto &[id, peer] : peers) status.pending_bytes += static_cast<int>(peer.pending);
-        status.detail = server ? "LAN host" : (connected ? "LAN connected" : "LAN looking for the host");
+        status.detail = !join_refusal.empty() ? join_refusal
+            : server                           ? "LAN host"
+            : connected                        ? "LAN connected"
+                                               : "LAN looking for the host";
     }
 };
 
@@ -218,7 +283,7 @@ bool LanTransport::host(unsigned capacity) {
     if (!open(port_)) return false;
     impl_->server = true;
     impl_->running = true;
-    impl_->my_id = 1;
+    impl_->my_id = lan_host_peer;
     capacity_ = capacity;
     impl_->refresh_status();
     return true;
@@ -233,9 +298,16 @@ bool LanTransport::join(std::uint64_t, std::uint32_t direct_ip, std::uint16_t di
     address.sin_port = htons(direct_port);
     impl_->server_address = address;
     impl_->have_server_address = true;
+    impl_->server_text = endpoint_text(direct_ip, direct_port);
     impl_->running = true;
     impl_->server = false;
     impl_->connected = false;
+    // A fresh dial proves itself from the start, whatever the last one ended with.
+    impl_->join_refusal.clear();
+    impl_->challenged = false;
+    impl_->host_nonce = 0;
+    impl_->guest_nonce = random_nonce();
+    impl_->hello_sent = false;
     impl_->refresh_status();
     return true;
 }
@@ -257,6 +329,9 @@ void LanTransport::stop() {
     impl_->peers.clear();
     impl_->inflight.clear();
     impl_->inbox.clear();
+    // The refusal is kept: the session reads it after stopping to tell the player what happened.
+    impl_->challenged = false;
+    impl_->pending_auth.clear();
     impl_->refresh_status();
 }
 
@@ -295,7 +370,26 @@ void LanTransport::poll() {
             std::string name;
             if (!read_text(buffer, static_cast<std::size_t>(received), at, name)) continue;
             if (!impl_->server) continue;
+            std::uint64_t guest_nonce = 0;
+            read_u64(buffer, static_cast<std::size_t>(received), at, guest_nonce);
             auto id = impl_->peer_at(from);
+            if (!id && impl_->require_password) {
+                // It is not in the session: no peer number, no name in the roster, until it proves
+                // the password. The challenge is all it gets.
+                auto &pending = impl_->pending_auth[Impl::address_key(from)];
+                if (!pending.host_nonce || pending.guest_nonce != guest_nonce) {
+                    pending = {};
+                    pending.host_nonce = random_nonce();
+                    pending.guest_nonce = guest_nonce;
+                    pending.since_us = now_us();
+                }
+                pending.name = name;
+                std::vector<std::uint8_t> frame;
+                impl_->frame_header(frame, FrameType::challenge, 0);
+                put_u64(frame, pending.host_nonce);
+                impl_->send_frame(from, frame);
+                continue;
+            }
             if (!id) {
                 if (impl_->peers.size() >= capacity_) {
                     std::vector<std::uint8_t> frame;
@@ -312,8 +406,73 @@ void LanTransport::poll() {
                 impl_->peers[id] = std::move(peer);
                 impl_->note("joined " + impl_->peers[id].name + " from " + lan_address_text(from) + ":" +
                             std::to_string(ntohs(from.sin_port)));
+                // At once, not at the next quarter-second: a player who has just joined is in the
+                // roster the session reads on this pass.
+                impl_->refresh_status();
             }
             impl_->peers[id].last_heard_us = now_us();
+            std::vector<std::uint8_t> frame;
+            impl_->frame_header(frame, FrameType::welcome, 0);
+            put_u64(frame, id);
+            put_text(frame, player_name_);
+            impl_->send_frame(from, frame);
+        } else if (type == FrameType::challenge) {
+            if (impl_->server || impl_->connected) continue;
+            std::uint64_t nonce{};
+            if (!read_u64(buffer, static_cast<std::size_t>(received), at, nonce)) continue;
+            if (!impl_->password) {
+                // It wants a password and this side was given none: say so, and stop dialling rather
+                // than look connected to nothing.
+                impl_->refuse("That LAN server needs its password: mp lan " +
+                              (impl_->server_text.empty() ? std::string("<address>") : impl_->server_text) + " <password>.");
+                break;
+            }
+            impl_->host_nonce = nonce;
+            impl_->challenged = true;
+            std::vector<std::uint8_t> frame;
+            impl_->frame_header(frame, FrameType::authenticate, 0);
+            const auto proof = handshake_proof(*impl_->password, impl_->guest_nonce, impl_->host_nonce);
+            frame.insert(frame.end(), proof.begin(), proof.end());
+            impl_->send_frame(from, frame);
+            impl_->last_hello_us = now_us();
+        } else if (type == FrameType::authenticate) {
+            if (!impl_->server) continue;
+            if (static_cast<std::size_t>(received) - at < PasswordKey{}.size()) continue;
+            const auto pending = impl_->pending_auth.find(Impl::address_key(from));
+            if (pending == impl_->pending_auth.end() || !impl_->password) continue;
+            PasswordKey proof{};
+            std::memcpy(proof.data(), buffer + at, proof.size());
+            const auto expected =
+                handshake_proof(*impl_->password, pending->second.guest_nonce, pending->second.host_nonce);
+            if (!proof_matches(expected, proof)) {
+                std::vector<std::uint8_t> frame;
+                impl_->frame_header(frame, FrameType::bye, 0);
+                put_text(frame, "Incorrect server password.");
+                impl_->send_frame(from, frame);
+                impl_->note("refused the wrong password from " + lan_address_text(from) + ":" +
+                            std::to_string(ntohs(from.sin_port)));
+                impl_->pending_auth.erase(pending);
+                continue;
+            }
+            const auto name = pending->second.name;
+            impl_->pending_auth.erase(pending);
+            if (impl_->peer_at(from)) continue;
+            if (impl_->peers.size() >= capacity_) {
+                std::vector<std::uint8_t> frame;
+                impl_->frame_header(frame, FrameType::bye, 0);
+                put_text(frame, "The server is full.");
+                impl_->send_frame(from, frame);
+                continue;
+            }
+            const auto id = impl_->next_peer_id++;
+            Impl::Peer peer;
+            peer.address = from;
+            peer.name = name.empty() ? "Player " + std::to_string(id) : name;
+            peer.last_heard_us = now_us();
+            impl_->peers[id] = std::move(peer);
+            impl_->note("joined " + impl_->peers[id].name + " from " + lan_address_text(from) + ":" +
+                        std::to_string(ntohs(from.sin_port)) + " with the server's password");
+            impl_->refresh_status();
             std::vector<std::uint8_t> frame;
             impl_->frame_header(frame, FrameType::welcome, 0);
             put_u64(frame, id);
@@ -330,14 +489,14 @@ void LanTransport::poll() {
             peer.address = from;
             peer.name = host_name;
             peer.last_heard_us = now_us();
-            impl_->peers[1] = std::move(peer);
+            impl_->peers[lan_host_peer] = std::move(peer);
             impl_->note("joined the host at " + lan_address_text(from) + ":" + std::to_string(ntohs(from.sin_port)));
         } else if (type == FrameType::data) {
             std::uint64_t from_id{};
             std::uint32_t seq{};
             if (!read_u64(buffer, static_cast<std::size_t>(received), at, from_id)) continue;
             if (!read_u32(buffer, static_cast<std::size_t>(received), at, seq)) continue;
-            const auto peer = impl_->server ? impl_->peer_at(from) : 1;
+            const auto peer = impl_->server ? impl_->peer_at(from) : lan_host_peer;
             if (!peer) continue;
             auto &entry = impl_->peers[peer];
             entry.last_heard_us = now_us();
@@ -347,7 +506,7 @@ void LanTransport::poll() {
                 // The acknowledgement names this side, because that is what the sender filed its
                 // in-flight copy under: the guest under the host's id (1), the host under the
                 // guest's assigned id. Naming the sender here would never match anything.
-                put_u64(ack, impl_->server ? 1 : impl_->my_id);
+                put_u64(ack, impl_->server ? lan_host_peer : impl_->my_id);
                 put_u32(ack, seq);
                 impl_->send_frame(from, ack);
                 accept(entry, peer, seq, buffer + at, static_cast<std::size_t>(received) - at);
@@ -364,7 +523,7 @@ void LanTransport::poll() {
             const auto count = static_cast<std::uint16_t>(buffer[at + 2] | (buffer[at + 3] << 8));
             at += 4;
             if (count == 0 || index >= count) continue;
-            const auto peer = impl_->server ? impl_->peer_at(from) : 1;
+            const auto peer = impl_->server ? impl_->peer_at(from) : lan_host_peer;
             if (!peer) continue;
             auto &entry = impl_->peers[peer];
             entry.last_heard_us = now_us();
@@ -400,7 +559,7 @@ void LanTransport::poll() {
             if (flags & flag_reliable) {
                 std::vector<std::uint8_t> ack;
                 impl_->frame_header(ack, FrameType::acknowledgement, 0);
-                put_u64(ack, impl_->server ? 1 : impl_->my_id);
+                put_u64(ack, impl_->server ? lan_host_peer : impl_->my_id);
                 put_u32(ack, seq);
                 impl_->send_frame(from, ack);
                 accept(entry, peer, seq, whole.data(), whole.size());
@@ -421,7 +580,13 @@ void LanTransport::poll() {
         } else if (type == FrameType::bye) {
             std::string reason;
             read_text(buffer, static_cast<std::size_t>(received), at, reason);
-            const auto peer = impl_->server ? impl_->peer_at(from) : 1;
+            if (!impl_->server && !impl_->connected) {
+                // The host turned the join away (a wrong password, or the server is full): the
+                // player is told its reason instead of a session that never started.
+                impl_->refuse(reason.empty() ? std::string("The LAN server refused the join.") : reason);
+                break;
+            }
+            const auto peer = impl_->server ? impl_->peer_at(from) : lan_host_peer;
             if (!peer) continue;
             const auto name = impl_->peers.count(peer) ? impl_->peers[peer].name : std::to_string(peer);
             impl_->closed[peer] = name + " left: " + (reason.empty() ? "closed the connection" : reason);
@@ -438,7 +603,7 @@ void LanTransport::poll() {
         } else if (type == FrameType::pong) {
             // ... and its answer is how the guest knows the host is still there.
             if (!impl_->server)
-                if (const auto host = impl_->peers.find(1); host != impl_->peers.end())
+                if (const auto host = impl_->peers.find(lan_host_peer); host != impl_->peers.end())
                     host->second.last_heard_us = now_us();
             if (impl_->ping_sent_us && now_us() > impl_->ping_sent_us)
                 impl_->ping_ms = static_cast<int>((now_us() - impl_->ping_sent_us) / 1000);
@@ -470,11 +635,22 @@ void LanTransport::poll() {
         ++it;
     }
     // A guest says hello until it is welcomed; both sides keep a ping going for the status line.
-    if (!impl_->server && impl_->have_server_address) {
-        if (!impl_->connected && (!impl_->hello_sent || now - impl_->last_hello_us > hello_every_us)) {
+    if (!impl_->server && impl_->have_server_address && impl_->running) {
+        if (!impl_->connected && impl_->challenged && impl_->password) {
+            // Challenged: the proof goes again until the host welcomes it, in case the first was lost.
+            if (now - impl_->last_hello_us > hello_every_us) {
+                std::vector<std::uint8_t> frame;
+                impl_->frame_header(frame, FrameType::authenticate, 0);
+                const auto proof = handshake_proof(*impl_->password, impl_->guest_nonce, impl_->host_nonce);
+                frame.insert(frame.end(), proof.begin(), proof.end());
+                impl_->send_frame(impl_->server_address, frame);
+                impl_->last_hello_us = now;
+            }
+        } else if (!impl_->connected && (!impl_->hello_sent || now - impl_->last_hello_us > hello_every_us)) {
             std::vector<std::uint8_t> frame;
             impl_->frame_header(frame, FrameType::hello, 0);
             put_text(frame, player_name_);
+            put_u64(frame, impl_->guest_nonce);
             impl_->send_frame(impl_->server_address, frame);
             impl_->last_hello_us = now;
             impl_->hello_sent = true;
@@ -485,6 +661,12 @@ void LanTransport::poll() {
             impl_->frame_header(frame, FrameType::ping, 0);
             impl_->send_frame(impl_->server_address, frame);
         }
+    }
+    // A host forgets an address that said hello and never proved itself, so a stuck handshake does
+    // not keep state forever.
+    for (auto it = impl_->pending_auth.begin(); it != impl_->pending_auth.end();) {
+        if (now - it->second.since_us > peer_timeout_us) it = impl_->pending_auth.erase(it);
+        else ++it;
     }
     // A host forgets a player it has not heard from at all.
     for (auto it = impl_->peers.begin(); it != impl_->peers.end();) {
@@ -499,13 +681,13 @@ void LanTransport::poll() {
     // or whose cable came out never says goodbye, and the game should say so rather than keep
     // sending to nowhere.
     if (!impl_->server && impl_->connected) {
-        const auto host = impl_->peers.find(1);
+        const auto host = impl_->peers.find(lan_host_peer);
         if (host == impl_->peers.end() || now - host->second.last_heard_us > peer_timeout_us) {
-            impl_->closed[1] = host == impl_->peers.end() ? "The host stopped answering"
-                                                         : host->second.name + " stopped answering";
-            impl_->peers.erase(1);
+            impl_->closed[lan_host_peer] = host == impl_->peers.end() ? "The host stopped answering"
+                                                                      : host->second.name + " stopped answering";
+            impl_->peers.erase(lan_host_peer);
             for (auto it = impl_->inflight.begin(); it != impl_->inflight.end();)
-                it = it->first.first == 1 ? impl_->inflight.erase(it) : std::next(it);
+                it = it->first.first == lan_host_peer ? impl_->inflight.erase(it) : std::next(it);
             impl_->connected = false;
             // Say hello again: a host that comes back is then rejoined by itself.
             impl_->hello_sent = false;
@@ -541,7 +723,7 @@ bool LanTransport::send(std::uint64_t id, std::span<const std::uint8_t> bytes, b
     } else {
         if (!impl_->have_server_address || !impl_->connected) return false;
         address = impl_->server_address;
-        id = 1;
+        id = lan_host_peer;
     }
     std::vector<std::uint8_t> body;
     put_u64(body, impl_->my_id);
@@ -669,6 +851,31 @@ bool LanTransport::set_send_rate(int bytes_per_second) {
     if (bytes_per_second < min_send_rate || bytes_per_second > max_send_rate) return false;
     send_rate_ = bytes_per_second;
     return true;
+}
+
+bool LanTransport::set_password(std::string_view password, bool hosting) {
+    impl_->require_password = false;
+    impl_->password.reset();
+    impl_->join_refusal.clear();
+    impl_->challenged = false;
+    impl_->host_nonce = 0;
+    impl_->pending_auth.clear();
+    if (!password.empty()) {
+        if (password.size() > 64) return false;
+        const auto key = password_key(password, lan_session_secret);
+        if (!key) return false;
+        impl_->password = key;
+    }
+    // Only a host demands one; a guest with a password proves it when it is challenged.
+    impl_->require_password = hosting && impl_->password.has_value();
+    impl_->refresh_status();
+    return true;
+}
+
+std::string LanTransport::take_join_refusal() {
+    auto reason = std::move(impl_->join_refusal);
+    impl_->join_refusal.clear();
+    return reason;
 }
 } // namespace dingosdk::multiplayer
 

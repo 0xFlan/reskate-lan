@@ -119,9 +119,12 @@ On this machine:   LAN/start-server.sh
 On each player:    install this pack over their ReSkate the same way, start the game as usual,
                   and in its console join the host:
                       mp lan 192.168.1.20:27015
-                  The port is optional when it is 27015. Steam sessions are untouched: mp host
-                  and mp join still run them exactly as before, and on a LAN session the Steam
-                  lobby and server browser are not used at all.
+                  The port is optional when it is 27015. If the server has a password ("password
+                  <text>" in its console or config), it goes after the address:
+                      mp lan 192.168.1.20:27015 hunter2
+                  Without it, or with the wrong one, the server refuses the join and the game says
+                  why. Steam sessions are untouched: mp host and mp join still run them exactly as
+                  before, and on a LAN session the Steam lobby and server browser are not used.
 Firewall:          allow incoming UDP 27015 (game) and 27026 (discovery)
 HELP
 

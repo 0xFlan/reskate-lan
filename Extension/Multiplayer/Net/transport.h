@@ -4,6 +4,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // What a transport is to everything above it: opaque bytes, lanes, peers by number. ReSkate's own
@@ -97,5 +98,11 @@ class Transport {
     virtual void set_packing(unsigned milliseconds) = 0;
     virtual bool listen_direct(std::uint16_t port) = 0;
     virtual void allow_peers(std::span<const Member> members) = 0;
+    // A password this side must prove (a guest) or demand (a host), before the connection is one.
+    // False for a transport that does not authenticate by itself: Steam's lobby carries the password.
+    virtual bool set_password(std::string_view, bool) { return false; }
+    // Why a host refused this join, once, when it said so ("Incorrect server password."). Empty
+    // otherwise: the session tells the player rather than showing them a join that never happened.
+    virtual std::string take_join_refusal() { return {}; }
 };
 } // namespace dingosdk::multiplayer

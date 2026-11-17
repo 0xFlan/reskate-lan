@@ -18,10 +18,11 @@ class SessionTransport final : public Transport {
     SessionTransport(const SessionTransport &) = delete;
     SessionTransport &operator=(const SessionTransport &) = delete;
 
-    // Takes the session onto the LAN: dials `endpoint` ("address" or "address:port"). False, with
-    // `error`, when the address cannot be read or no socket can be opened; the Steam transport is
-    // left as it was. `stop()` puts the session back on Steam.
-    bool use_lan(std::string player_name, std::string_view endpoint, std::string &error);
+    // Takes the session onto the LAN: dials `endpoint` ("address" or "address:port") and proves
+    // `password` when the host has one. False, with `error`, when the address or password cannot be
+    // used or no socket can be opened; the Steam transport is left as it was. `stop()` puts the
+    // session back on Steam.
+    bool use_lan(std::string player_name, std::string_view endpoint, std::string_view password, std::string &error);
     // True while a LAN join is what carries this session.
     bool lan_active() const { return lan_ != nullptr; }
 
@@ -55,6 +56,8 @@ class SessionTransport final : public Transport {
     void set_packing(unsigned milliseconds) override;
     bool listen_direct(std::uint16_t port) override;
     void allow_peers(std::span<const Member> members) override;
+    bool set_password(std::string_view password, bool hosting) override;
+    std::string take_join_refusal() override;
 
   private:
     // Whichever one carries this session. Defined in the .cpp, where both types are complete.

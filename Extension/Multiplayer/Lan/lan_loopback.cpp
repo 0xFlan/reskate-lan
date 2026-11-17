@@ -4,6 +4,7 @@
 #include "Extension/Multiplayer/Lan/lan_socket.h"
 #include "Extension/Multiplayer/Lan/lan_transport.h"
 #include "Extension/Multiplayer/Lan/lan_client.h"
+#include "Extension/Multiplayer/Lan/lan_session.h"
 
 #include <chrono>
 #include <cstdio>
@@ -54,7 +55,7 @@ int main() {
             guest_id = host.status().peers.front().id;
         }
         if (guest_connected && !sent_hello) {
-            sent_hello = guest.send(1, as_bytes("hello from the guest"), true, false, TrafficLane::control);
+            sent_hello = guest.send(lan_host_peer, as_bytes("hello from the guest"), true, false, TrafficLane::control);
         }
         for (const auto &message : host.receive()) {
             if (is(message.bytes, "hello from the guest")) {
@@ -67,7 +68,7 @@ int main() {
             }
         }
         if (host_got_hello && !sent_unreliable)
-            sent_unreliable = guest.send(1, as_bytes("unreliable from the guest"), false, false, TrafficLane::gameplay);
+            sent_unreliable = guest.send(lan_host_peer, as_bytes("unreliable from the guest"), false, false, TrafficLane::gameplay);
         for (const auto &message : guest.receive()) {
             if (is(message.bytes, "hello from the host")) guest_got_reply = true;
             if (is(message.bytes, "closing")) guest_saw_close = true;
@@ -98,8 +99,8 @@ int main() {
     // A message too big for one datagram is split up and put back together, on both lanes.
     std::vector<std::uint8_t> big(40000);
     for (std::size_t index = 0; index < big.size(); ++index) big[index] = static_cast<std::uint8_t>((index * 37 + 11) & 0xff);
-    const bool big_sent = guest.send(1, big, true, false, TrafficLane::control);
-    const bool big_unreliable_sent = guest.send(1, big, false, false, TrafficLane::gameplay);
+    const bool big_sent = guest.send(lan_host_peer, big, true, false, TrafficLane::control);
+    const bool big_unreliable_sent = guest.send(lan_host_peer, big, false, false, TrafficLane::gameplay);
     std::vector<std::uint8_t> big_back;
     std::vector<std::uint8_t> unreliable_back;
     for (int i = 0; i < 300 && (big_back.empty() || unreliable_back.empty()); ++i) {
@@ -157,7 +158,7 @@ int main() {
     // Reliable messages arrive in the order they were sent, however the network reorders them.
     for (int i = 0; i < 100; ++i) {
         const auto text = "in order " + std::to_string(i);
-        guest.send(1, {reinterpret_cast<const std::uint8_t *>(text.data()), text.size()}, true, false, TrafficLane::control);
+        guest.send(lan_host_peer, {reinterpret_cast<const std::uint8_t *>(text.data()), text.size()}, true, false, TrafficLane::control);
     }
     std::vector<std::string> ordered;
     for (int i = 0; i < 400 && ordered.size() < 100; ++i) {
@@ -197,7 +198,7 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     check(!guest.status().connected, "guest sees the host go away");
-    check(!guest.take_closed(1).empty(), "guest was told why the host closed it");
+    check(!guest.take_closed(lan_host_peer).empty(), "guest was told why the host closed it");
     host.disconnect(second_id, "closing");
     check(host.status().peers.empty(), "host dropped both peers");
 
@@ -236,7 +237,7 @@ int main() {
     // Both directions at once, over the path a session's packets take.
     for (int i = 0; i < 50; ++i) {
         const auto up = "client to host " + std::to_string(i);
-        client.transport().send(1, {reinterpret_cast<const std::uint8_t *>(up.data()), up.size()}, true, false,
+        client.transport().send(lan_host_peer, {reinterpret_cast<const std::uint8_t *>(up.data()), up.size()}, true, false,
                                 TrafficLane::control);
         const auto down = "host to client " + std::to_string(i);
         server2.send(client_peer, {reinterpret_cast<const std::uint8_t *>(down.data()), down.size()}, true, false,
@@ -279,7 +280,140 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     check(!client.transport().status().connected, "the client sees the host close the session");
-    check(!client.transport().take_closed(1).empty(), "the client was told why the host closed it");
+    check(!client.transport().take_closed(lan_host_peer).empty(), "the client was told why the host closed it");
+
+    // ---- A password-protected server: no password, a wrong one, the right one ----
+    // A host that demands a password challenges the peer, takes nothing from it until it proves the
+    // password, and never gives it a place in the session: the answer is a refusal with its reason,
+    // not a join that quietly never happened.
+    {
+        LanTransport locked("Locked host");
+        check(locked.set_password("hunter2", true), "a host takes a password");
+        check(locked.open(0) && locked.host(4), "a password-protected host listens");
+        const auto locked_address = "127.0.0.1:" + std::to_string(locked.port());
+
+        LanTransport none("Guest with no password");
+        check(none.join(0, htonl(INADDR_LOOPBACK), locked.port()), "a guest with no password dials it");
+        std::string refusal;
+        for (int i = 0; i < 400 && refusal.empty(); ++i) {
+            locked.poll();
+            none.poll();
+            locked.receive();
+            none.receive();
+            refusal = none.take_join_refusal();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        check(refusal.find("password") != std::string::npos,
+              "a guest with no password is told the server needs its password");
+        check(refusal.find(locked_address) != std::string::npos,
+              "that refusal says which address to retry with");
+        check(!none.status().connected, "a guest with no password is not connected");
+        check(locked.status().peers.empty(), "the host has no phantom peer for a guest with no password");
+        check(!none.send(lan_host_peer, as_bytes("session traffic"), true, false, TrafficLane::control),
+              "a guest with no password cannot send session traffic");
+
+        LanTransport wrong("Guest with the wrong password");
+        check(wrong.set_password("hunter3", false), "a guest takes the wrong password");
+        check(wrong.join(0, htonl(INADDR_LOOPBACK), locked.port()), "a guest with the wrong password dials it");
+        std::string wrong_refusal;
+        for (int i = 0; i < 400 && wrong_refusal.empty(); ++i) {
+            locked.poll();
+            wrong.poll();
+            locked.receive();
+            wrong.receive();
+            wrong_refusal = wrong.take_join_refusal();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        check(wrong_refusal.find("Incorrect server password") != std::string::npos,
+              "a guest with the wrong password is told the host refused it");
+        check(!wrong.status().connected, "a guest with the wrong password is not connected");
+        check(locked.status().peers.empty(), "the host has no phantom peer for a guest with the wrong password");
+
+        // A peer that says hello and never proves anything is never welcomed, so it is never in the
+        // session: nothing it sends is read, and nothing of the session is sent to it.
+        const auto raw = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (lan_socket_valid(raw)) {
+            lan_socket_nonblocking(raw);
+            sockaddr_in target{};
+            target.sin_family = AF_INET;
+            target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            target.sin_port = htons(locked.port());
+            std::vector<std::uint8_t> hello{'R', 'L', 'N', '1', 1, 0};
+            const std::string name = "Never proves it";
+            hello.push_back(static_cast<std::uint8_t>(name.size()));
+            hello.insert(hello.end(), name.begin(), name.end());
+            for (int i = 0; i < 8; ++i) hello.push_back(0); // its nonce, and no proof after it
+            ::sendto(raw, reinterpret_cast<const char *>(hello.data()), static_cast<int>(hello.size()), 0,
+                     reinterpret_cast<const sockaddr *>(&target), static_cast<int>(sizeof(target)));
+            bool welcomed = false;
+            char reply[512]{};
+            for (int i = 0; i < 100 && !welcomed; ++i) {
+                locked.poll();
+                locked.receive();
+                sockaddr_in from{};
+                LanSockLen length = static_cast<LanSockLen>(sizeof(from));
+                const auto got = ::recvfrom(raw, reply, static_cast<int>(sizeof(reply)), 0,
+                                            reinterpret_cast<sockaddr *>(&from), &length);
+                if (got >= 6 && reply[4] == 2) welcomed = true; // a welcome frame
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            check(!welcomed, "a peer that never authenticates is never welcomed");
+            check(locked.status().peers.empty(), "and the host keeps no place in the session for it");
+            lan_socket_close(raw);
+        }
+
+        LanTransport right("Guest with the right password");
+        check(right.set_password("hunter2", false), "a guest takes the right password");
+        check(right.join(0, htonl(INADDR_LOOPBACK), locked.port()), "a guest with the right password dials it");
+        bool joined = false;
+        for (int i = 0; i < 400 && !joined; ++i) {
+            locked.poll();
+            right.poll();
+            locked.receive();
+            right.receive();
+            joined = right.status().connected;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        check(joined, "the right password joins");
+        bool host_lists_it = false;
+        for (int i = 0; i < 200 && !host_lists_it; ++i) {
+            locked.poll();
+            locked.receive();
+            host_lists_it = locked.status().peers.size() == 1;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        check(host_lists_it, "the host has exactly that one player");
+        bool up = false, down = false;
+        const auto peer_id = locked.status().peers.empty() ? 0 : locked.status().peers.front().id;
+        for (int i = 0; i < 200 && !(up && down); ++i) {
+            right.send(lan_host_peer, as_bytes("proved it"), true, false, TrafficLane::control);
+            locked.send(peer_id, as_bytes("welcome in"), true, false, TrafficLane::control);
+            locked.poll();
+            right.poll();
+            for (const auto &message : locked.receive()) up = up || is(message.bytes, "proved it");
+            for (const auto &message : right.receive()) down = down || is(message.bytes, "welcome in");
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        check(up && down, "session traffic flows both ways once the password is proved");
+    }
+
+    // An open server still takes a guest that has no password at all.
+    {
+        LanTransport open_host("Open host");
+        check(open_host.open(0) && open_host.host(4), "an open host listens");
+        LanTransport open_guest("Open guest");
+        check(open_guest.join(0, htonl(INADDR_LOOPBACK), open_host.port()), "a guest with no password dials it");
+        bool joined = false;
+        for (int i = 0; i < 400 && !joined; ++i) {
+            open_host.poll();
+            open_guest.poll();
+            open_host.receive();
+            open_guest.receive();
+            joined = open_guest.status().connected;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        check(joined && open_host.status().peers.size() == 1, "an open server still accepts a passwordless join");
+    }
 
     std::printf("%s\n", failures ? "LAN loopback: FAILED" : "LAN loopback: all checks passed");
     return failures ? 1 : 0;

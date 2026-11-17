@@ -287,8 +287,13 @@ endif()
 # A loopback check of the LAN transport: a host and a guest in one process, over 127.0.0.1. Built on
 # every platform the transport is, so the Windows sockets are tested where they are not developed.
 add_executable(lan_loopback Extension/Multiplayer/Lan/lan_loopback.cpp Extension/Multiplayer/Lan/lan_transport.cpp
-    Extension/Multiplayer/Lan/lan_client.cpp)
+    Extension/Multiplayer/Lan/lan_client.cpp Extension/Multiplayer/Session/password.cpp)
 target_include_directories(lan_loopback PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/External/steam_networking")
+# The handshake's password proof is the lobby's own (Session/password.cpp): the same key derivation
+# and HMAC on every platform, so the check exercises what the game and the server will run.
 if(WIN32)
-    target_link_libraries(lan_loopback PRIVATE ws2_32)
+    target_link_libraries(lan_loopback PRIVATE ws2_32 bcrypt)
+else()
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(lan_loopback PRIVATE OpenSSL::Crypto)
 endif()

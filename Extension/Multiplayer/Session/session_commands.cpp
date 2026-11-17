@@ -1075,24 +1075,43 @@ std::string command(std::string_view action, std::string_view argument, std::str
                 publish(s);
                 return s.status;
             };
+            // "lan <address>[:port] [password]": the address first, then the password when the player
+            // types it here. The menu sends a password it collected through the private channel
+            // instead, so it never passes through the console's history.
+            auto address = argument;
+            std::string_view typed_password = input.password;
+            if (const auto space = argument.find(' '); space != std::string_view::npos) {
+                address = argument.substr(0, space);
+                if (typed_password.empty()) {
+                    auto rest = argument.substr(space + 1);
+                    while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
+                    typed_password = rest;
+                }
+            }
             std::uint32_t ip{};
             std::uint16_t port{};
             std::string error;
             // Checked before the session is ended for it, so a typo costs nothing.
-            if (!LanClient::parse_endpoint(argument, ip, port, error)) return refuse_lan(error);
+            if (!LanClient::parse_endpoint(address, ip, port, error)) return refuse_lan(error);
+            if (typed_password.size() > 64) return refuse_lan("A server password is 1-64 characters.");
             if (s.mode != Mode::off) return refuse_lan("Leave your current session before joining a LAN server.");
             stop(s, "Joining a LAN server...");
             const auto local = steam_social_snapshot() ? steam_social_snapshot()->local.name : std::string{};
-            if (!s.transport.use_lan(local, argument, error)) return refuse_lan(error);
+            if (!s.transport.use_lan(local, address, typed_password, error)) return refuse_lan(error);
             s.chat.clear();
             s.tps = multiplayer_default_tps;
             s.capacity = multiplayer_lobby_player_limit;
             s.epoch = nonce();
             // A LAN session carries a fixed tag rather than a join code's secret (Lan/lan_session.h).
             s.secret = lan_session_secret;
+            // The session's own proof too, not only the transport's: the server challenges a join on
+            // hello and on its map request, with the key its password derives from this same tag.
             erase_key(s.password);
+            if (!typed_password.empty()) s.password = password_key(typed_password, lan_session_secret);
             s.mode = Mode::join;
-            s.host_id = 1; // a LAN transport's host is peer 1, whichever player numbers it handed out
+            // A LAN host's number is fixed (Lan/lan_session.h), shaped like a SteamID64 so the roster,
+            // roles and admission treat it as a player's.
+            s.host_id = lan_host_peer;
             s.rejoin.reset();
             s.map_need.reset();
             // Wait for the host's initial policy, as any guest does.
@@ -1104,7 +1123,7 @@ std::string command(std::string_view action, std::string_view argument, std::str
             map_fetch_deadline_flag.store(0);
             set_lobby_park_mode(true, true);
             set_lobby_object_guest(true);
-            s.status = "Connecting to the LAN server at " + std::string(argument) + "...";
+            s.status = "Connecting to the LAN server at " + std::string(address) + "...";
             publish(s);
             return s.status;
         }

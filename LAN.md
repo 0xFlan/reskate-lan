@@ -14,7 +14,7 @@ UDP protocol, so a LAN party needs no Steam account, no relay and no internet.
 | `Extension/Multiplayer/Lan/lan_discovery.{h,cpp}` | Beacons that let a machine find servers on its network |
 | `Extension/Multiplayer/Lan/lan_socket.h` | The only platform-specific part: BSD sockets or WinSock |
 | `Extension/Multiplayer/Lan/lan_client.{h,cpp}` | The client: reads an address and dials it with the transport above |
-| `Extension/Multiplayer/Lan/lan_session.h` | The session tag a LAN session carries, and the default port |
+| `Extension/Multiplayer/Lan/lan_session.h` | The session tag a LAN session carries, the default port, and the host's peer number |
 | `Extension/Multiplayer/Net/session_transport.{h,cpp}` | The session's transport: Steam's, or the LAN client's once `mp lan` |
 | `Extension/Multiplayer/Lan/lan_loopback.cpp` | Three transports over loopback; every check below |
 | `Server/main.cpp` | `--lan`, `--lan-auto`, `--lan-discover` |
@@ -45,9 +45,35 @@ Steam session changes unless `mp lan` is used — and while a session is on the 
 lobby, the server browser and the Steam networking test are simply not used: `mp browse` says so
 instead of asking Steam anything.
 
-A LAN session is not authenticated. Its packets carry a fixed session tag (`lan_session.h`) rather
-than a join code's secret, so joining needs no code out of band; who a message came from is the
-transport's business, the address it was delivered from.
+A LAN session's packets carry a fixed session tag (`lan_session.h`) rather than a join code's
+secret, so joining needs no code out of band; who a message came from is the address it was
+delivered from.
+
+## Passwords
+
+A server can keep a password, exactly as on Steam: `password <text>` in its console (or
+`"password"` in its config) while it runs, and players who want in send it with the address:
+
+```
+mp lan 192.168.1.20:27015 hunter2
+```
+
+Nothing gets in without it, and the refusal is the host's own words:
+
+```
+That LAN server needs its password: mp lan 192.168.1.20:27015 <password>.
+Incorrect server password.
+```
+
+The handshake itself carries the password: the host answers a hello with a challenge and a nonce of
+its own, the player proves the password over both (HMAC-SHA256 with the key the lobby's own
+PBKDF2 gives it), and until that proof arrives the host gives that address no peer number at all —
+no place in the roster, nothing read from it, nothing sent to it. A player that never proves itself
+is challenged and then forgotten. An open server never sends a challenge, so its handshake is the
+three frames it always was.
+
+The session then checks the same password again on its own handshake, as it does on Steam: the
+server's `password` command, its config, and its join code's wording are untouched by any of this.
 
 ## Tests
 
@@ -55,7 +81,7 @@ transport's business, the address it was delivered from.
 cmake --build <build> --target lan_loopback && ./lan_loopback
 ```
 
-Thirty-nine checks cover the handshake, both lanes, peer naming, acknowledgement (a reliable message
+Sixty-one checks cover the handshake, both lanes, peer naming, acknowledgement (a reliable message
 must be acknowledged rather than resent until the peer drops), messages larger than one datagram
 being split and put back together on both lanes, two guests kept apart by one host, a hundred
 reliable messages arriving in the order they were sent, an idle player not being dropped, clean
@@ -63,8 +89,12 @@ disconnects, and the reason a peer was told why it was closed. The last twelve a
 session uses: `LanClient` reads `address:port` out of what a player types (and refuses a name or a
 port of zero), joins a loopback host, exchanges fifty reliable messages in each direction in order,
 stays connected through the peer timeout while idle, and sees the host's disconnect and its reason.
-The same binary is built and run on Windows in CI, so the WinSock path is tested where nobody here
-develops on it.
+Twenty-two more are the password: a guest with none is told the server needs its password (and
+which address to retry with), a guest with the wrong one is told the host refused it, neither is
+connected and neither leaves a phantom peer behind, a peer that says hello and never proves itself
+is never welcomed and keeps no place in the session, the right password joins and carries traffic
+both ways, and an open server still takes a passwordless guest. The same binary is built and run on
+Windows in CI, so the WinSock path is tested where nobody here develops on it.
 
 ## Limits
 
@@ -74,8 +104,8 @@ develops on it.
   the join path on all three platforms — but nobody has joined a real game with it on Windows yet:
   that needs a Windows machine with skate. installed, which the maintainer of this fork does not
   have. Treat the first join as a test, not as a shipping claim.
-- A password-protected LAN server cannot be joined from the game yet: `mp lan` takes an address,
-  and the password prompt travels with a join code that a LAN session has no use for.
+- No peer authentication beyond the password: the password protects the session, not who a player
+  is. Someone who knows it is in, with whatever name they like.
 - No peer authentication. Anyone who can reach the port can join, which is fine on a home LAN and
   not fine on a shared network.
 - `send_rate` is not enforced: a LAN has no relay to protect, so the transport sends as fast as it is given.

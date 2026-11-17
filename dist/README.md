@@ -38,7 +38,16 @@ the game as usual, then in the console:
 mp lan 192.168.1.20:27015
 ```
 
-That is the address the host printed (the port is optional when it is 27015). The session then runs
+That is the address the host printed (the port is optional when it is 27015). A server with a
+password takes it after the address, as the host set it (`password <text>` in its console or its
+config):
+
+```
+mp lan 192.168.1.20:27015 hunter2
+```
+
+Without it the server refuses the join and says so — "That LAN server needs its password" — and does
+the same for a wrong one, before the player is in the session at all. The session then runs
 over the same UDP transport the server runs, and the Steam lobby, server browser and Steam
 networking test are not used at all while it does. `mp browse` says so rather than asking Steam.
 
@@ -60,9 +69,10 @@ needs none of this: run the server from `bin/` and leave the game as it is.
 
 ## How far this has been tested
 
-- The server and the LAN transport are run on macOS, Linux and Windows in CI: 39 checks over the
-  handshake, both lanes, fragmentation, ordering, two guests at once, idle survival and clean
-  disconnects — plus a smoke test that starts a real server and finds it with `--lan-discover`.
+- The server and the LAN transport are run on macOS, Linux and Windows in CI: 61 checks over the
+  handshake, both lanes, fragmentation, ordering, two guests at once, idle survival, clean
+  disconnects and the password (none, wrong, right, an open server, and a peer that never proves
+  itself) — plus a smoke test that starts a real server and finds it with `--lan-discover`.
 - The join path is the same code (`LanClient` → `LanTransport`), and the loopback test joins a host
   through it on all three platforms: fifty reliable messages in each direction in order, an idle
   period, and a disconnect with its reason.
@@ -73,9 +83,8 @@ needs none of this: run the server from `bin/` and leave the game as it is.
 ## Known limits
 
 - UDP 27015 (game) and 27026 (discovery) must be allowed in; macOS asks the first time.
-- A password-protected LAN server cannot be joined from the game yet: `mp lan` takes an address, and
-  the password prompt travels with a join code a LAN session does not use.
-- No peer authentication: anyone who can reach the port can join. Fine on a home LAN, not on a
+- A password protects the session, not identity: someone who knows it is in, under whatever name
+  they like. An open server is open to anyone who can reach its port — fine on a home LAN, not on a
   shared network.
 - Everyone needs this same build: stock ReSkate speaks Steam's network, this one speaks LAN.
 - The client runtime in this pack is Windows: the fork's runtime only builds with MSVC, and its
