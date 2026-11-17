@@ -25,7 +25,8 @@ files. This pack does that, from a folder, with no compiler and no checkout:
 
 ```sh
 ./install.sh                              # dry run, shows what would change
-./install.sh --reskate-dir ~/Skate3Recomp --apply
+./install.sh --apply                      # finds ReSkate and does it
+./install.sh --reskate-dir "$HOME/ReSkate" --apply   # or point at its folder
 ```
 
 It backs up everything it replaces into `LAN-backup/`, and `LAN/restore.sh` undoes all of it.
