@@ -22,9 +22,20 @@ for name in ReSkate.dll libReSkate.so ReSkate.dylib; do
 done
 [ "$found" -eq 1 ] || { echo "nothing to pack in $build" >&2; exit 1; }
 
+# The Windows server (built by CI, copied in by hand: this zip is assembled off a Windows build's
+# artifact). Its launcher is kept beside the other sources and copied in here, so the zip always
+# carries the one that is in git.
+win="$out/windows"
+mkdir -p "$win"
+[ -f "$here/windows/start-server.bat" ] && cp "$here/windows/start-server.bat" "$win/start-server.bat"
+[ -f "$build/ReSkateServer.exe" ] && cp "$build/ReSkateServer.exe" "$win/ReSkateServer.exe"
+
+# ReSkate is GPL-3.0: the zip carries the licence, and the source is the repository it came from.
+cp "$here/../LICENSE" "$here/LICENSE" 2>/dev/null || true
+
 version=$(date +%Y.%m.%d)
 zip="$here/ReSkate-LAN-$version.zip"
 rm -f "$zip"
-( cd "$here" && zip -qr "$zip" bin install.sh README.md )
+( cd "$here" && zip -qr "$zip" bin install.sh README.md LICENSE )
 echo "wrote $zip"
-ls -1 "$out"
+ls -1 "$out" "$win"

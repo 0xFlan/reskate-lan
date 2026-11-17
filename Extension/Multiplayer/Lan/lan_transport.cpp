@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <map>
 #include <utility>
 
@@ -17,9 +18,18 @@ constexpr std::uint8_t magic[4] = {'R', 'L', 'N', '1'};
 constexpr std::size_t header_size = 6; // magic, type, flags
 constexpr std::size_t max_datagram = 8000;
 constexpr std::uint64_t resend_after_us = 200'000;
-constexpr unsigned max_tries = 10;
+// About five seconds before a message is given up on: long enough to ride out a Wi-Fi blip, short
+// enough that a player whose machine went away is not left waiting for it.
+constexpr unsigned max_tries = 24;
 constexpr std::uint64_t hello_every_us = 500'000;
 constexpr std::uint64_t peer_timeout_us = 10'000'000;
+// Work per poll() is bounded: a frame reads at most this many datagrams, so a flood (or a peer
+// sending as fast as its card allows) delays the game by a frame rather than by however long it
+// keeps sending.
+constexpr unsigned max_datagrams_per_poll = 256;
+// Half-built messages kept per peer. More than a couple are in flight only if fragments are being
+// lost or a peer is flooding, and either way the memory is better bounded than spent.
+constexpr std::size_t max_assemblies = 8;
 
 enum class FrameType : std::uint8_t {
     hello = 1, welcome = 2, data = 3, acknowledgement = 4, bye = 5, ping = 6, pong = 7, fragment = 8
@@ -100,10 +110,16 @@ struct LanTransport::Impl {
         sockaddr_in address{};
         std::string name;
         std::uint64_t last_heard_us = 0;
+        // One sequence space per lane: reliable messages are numbered and delivered in order, and a
+        // split unreliable one is numbered only to put its fragments back together. Sharing one
+        // counter meant an unreliable message that nobody was waiting to deliver left a gap the
+        // reliable stream could never pass.
         std::uint32_t send_seq_next = 1;
+        std::uint32_t send_seq_next_unreliable = 1;
         std::uint32_t deliver_next = 1;
         std::map<std::uint32_t, std::vector<std::uint8_t>> waiting;
         std::map<std::uint32_t, Assembly> assembling;
+        std::map<std::uint32_t, Assembly> assembling_unreliable;
         std::int64_t pending = 0;
     };
     std::map<std::uint64_t, Peer> peers;
@@ -263,7 +279,7 @@ void LanTransport::poll() {
         }
     };
     std::uint8_t buffer[max_datagram];
-    for (;;) {
+    for (unsigned datagrams = 0; datagrams < max_datagrams_per_poll; ++datagrams) {
         sockaddr_in from{};
         LanSockLen length = static_cast<LanSockLen>(sizeof(from));
         const auto received = ::recvfrom(impl_->fd, reinterpret_cast<char *>(buffer), static_cast<int>(sizeof(buffer)), 0,
@@ -352,13 +368,23 @@ void LanTransport::poll() {
             if (!peer) continue;
             auto &entry = impl_->peers[peer];
             entry.last_heard_us = now_us();
-            auto &assembly = entry.assembling[seq];
+            auto &assemblies = (flags & flag_reliable) ? entry.assembling : entry.assembling_unreliable;
+            auto built = assemblies.find(seq);
+            if (built == assemblies.end()) {
+                if (assemblies.size() >= max_assemblies) {
+                    // Nothing here is ever waited for again, so the oldest goes: the peer that never
+                    // finishes one message cannot make this side hold them all.
+                    assemblies.erase(assemblies.begin());
+                }
+                built = assemblies.emplace(seq, Impl::Assembly{}).first;
+            }
+            auto &assembly = built->second;
             if (assembly.parts.empty()) {
                 assembly.count = count;
                 assembly.parts.resize(count);
             }
             if (assembly.count != count) {
-                entry.assembling.erase(seq);
+                assemblies.erase(built);
                 continue;
             }
             if (assembly.parts[index].empty()) {
@@ -368,7 +394,7 @@ void LanTransport::poll() {
             if (assembly.have != assembly.count) continue;
             std::vector<std::uint8_t> whole;
             for (const auto &part : assembly.parts) whole.insert(whole.end(), part.begin(), part.end());
-            entry.assembling.erase(seq);
+            assemblies.erase(built);
             // Acknowledge once the message is whole, so a lost fragment is asked for again rather than
             // the sender being told the message arrived.
             if (flags & flag_reliable) {
@@ -402,10 +428,18 @@ void LanTransport::poll() {
             impl_->peers.erase(peer);
             if (!impl_->server) impl_->connected = false;
         } else if (type == FrameType::ping) {
+            // A quiet player is still there: its ping is how the host knows not to forget it.
+            if (impl_->server) {
+                if (const auto peer = impl_->peer_at(from); peer) impl_->peers[peer].last_heard_us = now_us();
+            }
             std::vector<std::uint8_t> frame;
             impl_->frame_header(frame, FrameType::pong, 0);
             impl_->send_frame(from, frame);
         } else if (type == FrameType::pong) {
+            // ... and its answer is how the guest knows the host is still there.
+            if (!impl_->server)
+                if (const auto host = impl_->peers.find(1); host != impl_->peers.end())
+                    host->second.last_heard_us = now_us();
             if (impl_->ping_sent_us && now_us() > impl_->ping_sent_us)
                 impl_->ping_ms = static_cast<int>((now_us() - impl_->ping_sent_us) / 1000);
             impl_->ping_sent_us = 0;
@@ -461,6 +495,22 @@ void LanTransport::poll() {
             ++it;
         }
     }
+    // A guest forgets a host that went quiet: a host whose process ended, whose machine was closed
+    // or whose cable came out never says goodbye, and the game should say so rather than keep
+    // sending to nowhere.
+    if (!impl_->server && impl_->connected) {
+        const auto host = impl_->peers.find(1);
+        if (host == impl_->peers.end() || now - host->second.last_heard_us > peer_timeout_us) {
+            impl_->closed[1] = host == impl_->peers.end() ? "The host stopped answering"
+                                                         : host->second.name + " stopped answering";
+            impl_->peers.erase(1);
+            for (auto it = impl_->inflight.begin(); it != impl_->inflight.end();)
+                it = it->first.first == 1 ? impl_->inflight.erase(it) : std::next(it);
+            impl_->connected = false;
+            // Say hello again: a host that comes back is then rejoined by itself.
+            impl_->hello_sent = false;
+        }
+    }
     const auto status_now = now_us();
     if (status_now - impl_->last_status_us > 250'000) {
         impl_->last_status_us = status_now;
@@ -495,11 +545,14 @@ bool LanTransport::send(std::uint64_t id, std::span<const std::uint8_t> bytes, b
     }
     std::vector<std::uint8_t> body;
     put_u64(body, impl_->my_id);
-    auto &peer = impl_->peers[id];
+    const auto found = impl_->peers.find(id);
+    if (found == impl_->peers.end()) return false;
+    auto &peer = found->second;
     // A split message needs a sequence number even on the unreliable lane, to put its parts together.
     const bool split = header_size + body.size() + 4 + bytes.size() > max_datagram;
     std::uint32_t seq = 0;
-    if (reliable || split) seq = peer.send_seq_next++;
+    if (reliable) seq = peer.send_seq_next++;
+    else if (split) seq = peer.send_seq_next_unreliable++;
     put_u32(body, seq);
 
     std::vector<std::vector<std::uint8_t>> frames;

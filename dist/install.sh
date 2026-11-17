@@ -33,6 +33,7 @@ fi
 if [ -z "$TARGET" ] || [ ! -d "$TARGET" ]; then
     echo "Could not find a ReSkate folder. Point at it with --reskate-dir <folder>." >&2
     echo "On macOS it is ~/Library/Application Support/ReSkate for Mac/game." >&2
+    echo "Hosting needs no install at all: run bin/ReSkateServer --lan (Windows: bin\\windows\\start-server.bat)." >&2
     exit 1
 fi
 TARGET=$(cd "$TARGET" && pwd)
@@ -110,10 +111,11 @@ Everyone who wants to play needs this same pack: stock ReSkate speaks Steam's ne
 build speaks LAN, and the two cannot talk to each other.
 
 On this machine:   LAN/start-server.sh
-                  (the log prints the address to give out, and a join code)
-On each player:    run ReSkate, choose Multiplayer > LAN, pick the server that shows up
+                  (the log prints the address to give out)
+On each player:    nothing to do yet: the game's own session still runs on Steam's transport,
+                  so the LAN client is the next piece of work. Hosting works now.
 Mac firewall:      allow incoming UDP 27015 (game) and 27026 (discovery)
 HELP
 
 echo "Installed. Start it with: $TARGET/LAN/start-server.sh"
-[ -z "$dll_src" ] && echo "Note: no client runtime in bin/, so this only replaces the host. Players still need one." >&2
+[ -z "$dll_src" ] && echo "Note: no client runtime in bin/, so this replaces the host only: a player's game still joins over Steam until the LAN client lands." >&2

@@ -36,14 +36,21 @@ hand out; players see the server in the game's LAN list.
 cmake --build <build> --target lan_loopback && ./lan_loopback
 ```
 
-Eighteen checks cover the handshake, both lanes, peer naming, acknowledgement (a reliable message
+Twenty-seven checks cover the handshake, both lanes, peer naming, acknowledgement (a reliable message
 must be acknowledged rather than resent until the peer drops), messages larger than one datagram
-being split and put back together on both lanes, clean disconnects, and the reason a peer was told
-why it was closed.
+being split and put back together on both lanes, two guests kept apart by one host, a hundred
+reliable messages arriving in the order they were sent, an idle player not being dropped, clean
+disconnects, and the reason a peer was told why it was closed. The same binary is built and run on
+Windows in CI, so the WinSock path is tested where nobody here develops on it.
 
 ## Limits
 
 - Both ends must run this fork: stock ReSkate speaks Steam's protocol and the two cannot talk.
+- The joining half is not wired into the game yet. The server takes `--lan` on every platform, and
+  `lan_loopback` proves the transport; but the runtime the game loads still builds its session with
+  `SteamTransport` (`Extension/Multiplayer/Session/session_internal.h`), so a player's game cannot
+  yet join over LAN. That wiring is the next piece of work, and it needs a real Windows client to
+  test — the transport below it is finished.
 - No peer authentication. Anyone who can reach the port can join, which is fine on a home LAN and
   not fine on a shared network.
 - `send_rate` is not enforced: a LAN has no relay to protect, so the transport sends as fast as it is given.

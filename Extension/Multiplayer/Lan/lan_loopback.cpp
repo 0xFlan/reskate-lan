@@ -118,6 +118,75 @@ int main() {
     check(big_sent && big_back == big, "a message larger than one datagram arrives whole");
     check(big_unreliable_sent && unreliable_back == big, "a large unreliable message arrives whole too");
 
+    // Two players at once: the host keeps them apart, and a message to one is not the other's.
+    LanTransport second("Second");
+    check(second.join(0, htonl(INADDR_LOOPBACK), host.port()), "a second guest dials the host");
+    std::uint64_t second_id = 0;
+    for (int i = 0; i < 400 && !(second_id && second.status().connected); ++i) {
+        host.poll();
+        guest.poll();
+        second.poll();
+        guest.receive();
+        host.receive();
+        second.receive();
+        for (const auto &peer : host.status().peers)
+            if (host.name(peer.id) == "Second") second_id = peer.id;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(second_id != 0, "the host lists the second guest");
+    check(second.status().connected, "the second guest's handshake completed");
+    check(host.status().peers.size() == 2, "the host lists both guests");
+
+    bool second_got_private = false, guest_got_private = false;
+    host.send(second_id, as_bytes("only for the second"), true, false, TrafficLane::control);
+    for (int i = 0; i < 200 && !second_got_private; ++i) {
+        host.poll();
+        guest.poll();
+        second.poll();
+        host.receive();
+        for (const auto &message : guest.receive())
+            if (is(message.bytes, "only for the second")) guest_got_private = true;
+        for (const auto &message : second.receive())
+            if (is(message.bytes, "only for the second")) second_got_private = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(second_got_private, "a message addressed to one guest reaches it");
+    check(!guest_got_private, "a message for one guest is not another's");
+
+    // Reliable messages arrive in the order they were sent, however the network reorders them.
+    for (int i = 0; i < 100; ++i) {
+        const auto text = "in order " + std::to_string(i);
+        guest.send(1, {reinterpret_cast<const std::uint8_t *>(text.data()), text.size()}, true, false, TrafficLane::control);
+    }
+    std::vector<std::string> ordered;
+    for (int i = 0; i < 400 && ordered.size() < 100; ++i) {
+        host.poll();
+        guest.poll();
+        second.poll();
+        guest.receive();
+        second.receive();
+        for (const auto &message : host.receive()) ordered.emplace_back(message.bytes.begin(), message.bytes.end());
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    bool in_order = ordered.size() == 100;
+    for (std::size_t i = 0; in_order && i < ordered.size(); ++i) in_order = ordered[i] == "in order " + std::to_string(i);
+    check(in_order, "a hundred reliable messages arrive in the order they were sent");
+
+    // A player that says nothing for longer than the peer timeout is still there: its pings are
+    // what tells the host (and the host's answers tell the guest).
+    const auto idle_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(11'000);
+    while (std::chrono::steady_clock::now() < idle_until) {
+        host.poll();
+        guest.poll();
+        second.poll();
+        host.receive();
+        guest.receive();
+        second.receive();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    check(host.status().peers.size() == 2, "an idle player is not dropped by the host");
+    check(guest.status().connected && second.status().connected, "idle guests still count themselves connected");
+
     // A disconnect is told to the other side, and shows up as a closed connection.
     host.disconnect(guest_id, "closing");
     for (int i = 0; i < 100 && !guest_saw_close; ++i) {
@@ -128,7 +197,8 @@ int main() {
     }
     check(!guest.status().connected, "guest sees the host go away");
     check(!guest.take_closed(1).empty(), "guest was told why the host closed it");
-    check(host.status().peers.empty(), "host dropped the peer");
+    host.disconnect(second_id, "closing");
+    check(host.status().peers.empty(), "host dropped both peers");
     std::printf("%s\n", failures ? "LAN loopback: FAILED" : "LAN loopback: all checks passed");
     return failures ? 1 : 0;
 }
