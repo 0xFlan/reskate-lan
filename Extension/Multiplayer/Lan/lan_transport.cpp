@@ -1,3 +1,5 @@
+// First, so WinSock is declared before any other header can bring in windows.h.
+#include "lan_socket.h"
 #include "lan_transport.h"
 
 #include <algorithm>
@@ -6,14 +8,6 @@
 #include <deque>
 #include <map>
 #include <utility>
-
-#ifndef _WIN32
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
 
 namespace dingosdk::multiplayer {
 namespace {
@@ -80,7 +74,7 @@ bool same_address(const sockaddr_in &a, const sockaddr_in &b) {
 } // namespace
 
 struct LanTransport::Impl {
-    int fd = -1;
+    LanSocket fd = lan_no_socket;
     bool server = false;
     bool running = false;
     bool connected = false;
@@ -133,9 +127,9 @@ struct LanTransport::Impl {
         return 0;
     }
     bool send_frame(const sockaddr_in &address, const std::vector<std::uint8_t> &frame) {
-        if (fd < 0) return false;
-        const auto sent = ::sendto(fd, frame.data(), frame.size(), 0, reinterpret_cast<const sockaddr *>(&address),
-                                   sizeof(address));
+        if (fd == lan_no_socket) return false;
+        const auto sent = ::sendto(fd, reinterpret_cast<const char *>(frame.data()), static_cast<int>(frame.size()), 0,
+                                   reinterpret_cast<const sockaddr *>(&address), static_cast<int>(sizeof(address)));
         if (sent < 0) return false;
         bytes_sent += static_cast<std::uint64_t>(sent);
         return true;
@@ -181,32 +175,27 @@ LanTransport::LanTransport(std::string player_name) : impl_(std::make_unique<Imp
 LanTransport::~LanTransport() { stop(); }
 
 bool LanTransport::open(std::uint16_t port) {
-#ifndef _WIN32
-    if (impl_->fd >= 0) return true;
-    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return false;
-    int yes = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-    ::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+    if (impl_->fd != lan_no_socket) return true;
+    if (!lan_sockets_ready()) return false;
+    const LanSocket fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (!lan_socket_valid(fd)) return false;
+    const int yes = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, lan_option(&yes), static_cast<int>(sizeof(yes)));
+    ::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, lan_option(&yes), static_cast<int>(sizeof(yes)));
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_ANY);
     address.sin_port = htons(port);
-    if (::bind(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) < 0) {
-        ::close(fd);
+    if (::bind(fd, reinterpret_cast<sockaddr *>(&address), static_cast<int>(sizeof(address))) != 0) {
+        lan_socket_close(fd);
         return false;
     }
-    const int flags = ::fcntl(fd, F_GETFL, 0);
-    ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    socklen_t length = sizeof(address);
+    lan_socket_nonblocking(fd);
+    LanSockLen length = static_cast<LanSockLen>(sizeof(address));
     ::getsockname(fd, reinterpret_cast<sockaddr *>(&address), &length);
     port_ = ntohs(address.sin_port);
     impl_->fd = fd;
     return true;
-#else
-    (void)port;
-    return false;
-#endif
 }
 
 bool LanTransport::host(unsigned capacity) {
@@ -236,8 +225,7 @@ bool LanTransport::join(std::uint64_t, std::uint32_t direct_ip, std::uint16_t di
 }
 
 void LanTransport::stop() {
-#ifndef _WIN32
-    if (impl_->fd >= 0) {
+    if (impl_->fd != lan_no_socket) {
         if (impl_->server)
             for (const auto &[id, peer] : impl_->peers) {
                 std::vector<std::uint8_t> frame;
@@ -245,10 +233,9 @@ void LanTransport::stop() {
                 put_text(frame, "The server is closing.");
                 impl_->send_frame(peer.address, frame);
             }
-        ::close(impl_->fd);
-        impl_->fd = -1;
+        lan_socket_close(impl_->fd);
+        impl_->fd = lan_no_socket;
     }
-#endif
     impl_->running = false;
     impl_->connected = false;
     impl_->peers.clear();
@@ -258,8 +245,7 @@ void LanTransport::stop() {
 }
 
 void LanTransport::poll() {
-    if (impl_->fd < 0 || !impl_->running) return;
-#ifndef _WIN32
+    if (impl_->fd == lan_no_socket || !impl_->running) return;
     const auto accept = [this](Impl::Peer &entry, std::uint64_t peer, std::uint32_t seq, const std::uint8_t *payload,
                                std::size_t size) {
         if (seq < entry.deliver_next) return;
@@ -279,8 +265,9 @@ void LanTransport::poll() {
     std::uint8_t buffer[max_datagram];
     for (;;) {
         sockaddr_in from{};
-        socklen_t length = sizeof(from);
-        const auto received = ::recvfrom(impl_->fd, buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr *>(&from), &length);
+        LanSockLen length = static_cast<LanSockLen>(sizeof(from));
+        const auto received = ::recvfrom(impl_->fd, reinterpret_cast<char *>(buffer), static_cast<int>(sizeof(buffer)), 0,
+                                         reinterpret_cast<sockaddr *>(&from), &length);
         if (received <= 0) break;
         if (static_cast<std::size_t>(received) < header_size) continue;
         if (std::memcmp(buffer, magic, sizeof(magic)) != 0) continue;
@@ -307,8 +294,8 @@ void LanTransport::poll() {
                 peer.name = name.empty() ? "Player " + std::to_string(id) : name;
                 peer.last_heard_us = now_us();
                 impl_->peers[id] = std::move(peer);
-                impl_->note("joined " + impl_->peers[id].name + " from " +
-                            std::string(inet_ntoa(from.sin_addr)) + ":" + std::to_string(ntohs(from.sin_port)));
+                impl_->note("joined " + impl_->peers[id].name + " from " + lan_address_text(from) + ":" +
+                            std::to_string(ntohs(from.sin_port)));
             }
             impl_->peers[id].last_heard_us = now_us();
             std::vector<std::uint8_t> frame;
@@ -328,8 +315,7 @@ void LanTransport::poll() {
             peer.name = host_name;
             peer.last_heard_us = now_us();
             impl_->peers[1] = std::move(peer);
-            impl_->note("joined the host at " + std::string(inet_ntoa(from.sin_addr)) + ":" +
-                        std::to_string(ntohs(from.sin_port)));
+            impl_->note("joined the host at " + lan_address_text(from) + ":" + std::to_string(ntohs(from.sin_port)));
         } else if (type == FrameType::data) {
             std::uint64_t from_id{};
             std::uint32_t seq{};
@@ -475,7 +461,6 @@ void LanTransport::poll() {
             ++it;
         }
     }
-#endif
     const auto status_now = now_us();
     if (status_now - impl_->last_status_us > 250'000) {
         impl_->last_status_us = status_now;

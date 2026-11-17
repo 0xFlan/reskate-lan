@@ -12,6 +12,7 @@ UDP protocol, so a LAN party needs no Steam account, no relay and no internet.
 | `Extension/Multiplayer/Net/transport.h` | The transport contract the session layer talks to |
 | `Extension/Multiplayer/Lan/lan_transport.{h,cpp}` | The UDP transport: handshake, reliability, ordering |
 | `Extension/Multiplayer/Lan/lan_discovery.{h,cpp}` | Beacons that let a machine find servers on its network |
+| `Extension/Multiplayer/Lan/lan_socket.h` | The only platform-specific part: BSD sockets or WinSock |
 | `Extension/Multiplayer/Lan/lan_loopback.cpp` | Two transports over loopback; every check below |
 | `Server/main.cpp` | `--lan`, `--lan-auto`, `--lan-discover` |
 

@@ -1,3 +1,5 @@
+// First, so WinSock is declared before any other header can bring in windows.h.
+#include "lan_socket.h"
 #include "lan_discovery.h"
 
 #include <algorithm>
@@ -6,14 +8,6 @@
 #include <cstring>
 #include <map>
 #include <thread>
-
-#ifndef _WIN32
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
 
 namespace dingosdk::multiplayer {
 namespace {
@@ -49,9 +43,7 @@ std::vector<std::uint8_t> make_beacon(const std::string &name, const std::string
 } // namespace
 
 struct LanDiscovery::Impl {
-#ifndef _WIN32
-    int fd = -1;
-#endif
+    LanSocket fd = lan_no_socket;
     std::string name, map;
     std::uint16_t port{};
     unsigned players{}, capacity{};
@@ -69,27 +61,22 @@ bool LanDiscovery::advertise(std::string name, std::string map, std::uint16_t ga
     impl_->map = std::move(map);
     impl_->port = game_port;
     impl_->capacity = max_players;
-#ifndef _WIN32
-    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return false;
-    int yes = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
-    const int flags = ::fcntl(fd, F_GETFL, 0);
-    ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (!lan_sockets_ready()) return false;
+    const LanSocket fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (!lan_socket_valid(fd)) return false;
+    const int yes = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, lan_option(&yes), static_cast<int>(sizeof(yes)));
+    lan_socket_nonblocking(fd);
     impl_->fd = fd;
     impl_->broadcast.sin_family = AF_INET;
     impl_->broadcast.sin_addr.s_addr = htonl(INADDR_BROADCAST);
     impl_->broadcast.sin_port = htons(discovery_port);
     impl_->last_beacon_us = 0; // so the next update() sends one straight away
     return true;
-#else
-    return false;
-#endif
 }
 
 void LanDiscovery::update(unsigned players) {
-#ifndef _WIN32
-    if (impl_->fd < 0) return;
+    if (impl_->fd == lan_no_socket) return;
     const auto now = now_us();
     if (impl_->last_beacon_us && now - impl_->last_beacon_us < beacon_every_us) return;
     impl_->last_beacon_us = now;
@@ -97,44 +84,51 @@ void LanDiscovery::update(unsigned players) {
     const auto beacon = make_beacon(impl_->name, impl_->map, impl_->port, impl_->players, impl_->capacity);
     // The subnet broadcast finds other machines; the loopback copy lets a server and a client on
     // one machine see each other, which is how this gets tested.
-    ::sendto(impl_->fd, beacon.data(), beacon.size(), 0, reinterpret_cast<const sockaddr *>(&impl_->broadcast),
-             sizeof(impl_->broadcast));
+    ::sendto(impl_->fd, reinterpret_cast<const char *>(beacon.data()), static_cast<int>(beacon.size()), 0,
+             reinterpret_cast<const sockaddr *>(&impl_->broadcast), static_cast<int>(sizeof(impl_->broadcast)));
     sockaddr_in loopback{};
     loopback.sin_family = AF_INET;
     loopback.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     loopback.sin_port = htons(discovery_port);
-    ::sendto(impl_->fd, beacon.data(), beacon.size(), 0, reinterpret_cast<const sockaddr *>(&loopback), sizeof(loopback));
-#endif
+    ::sendto(impl_->fd, reinterpret_cast<const char *>(beacon.data()), static_cast<int>(beacon.size()), 0,
+             reinterpret_cast<const sockaddr *>(&loopback), static_cast<int>(sizeof(loopback)));
 }
 
 void LanDiscovery::stop() {
-#ifndef _WIN32
-    if (impl_->fd >= 0) {
-        ::close(impl_->fd);
-        impl_->fd = -1;
+    if (impl_->fd != lan_no_socket) {
+        lan_socket_close(impl_->fd);
+        impl_->fd = lan_no_socket;
     }
-#endif
     impl_->last_beacon_us = 0;
 }
 
 std::vector<LanServer> LanDiscovery::discover(std::chrono::milliseconds wait) {
     std::vector<LanServer> servers;
+    if (!lan_sockets_ready()) return servers;
+    const LanSocket fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (!lan_socket_valid(fd)) return servers;
+    const int yes = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, lan_option(&yes), static_cast<int>(sizeof(yes)));
+    // A second listener on the same machine's beacon port (a host and a client in one process, which
+    // is how this gets tested). Windows spells this SO_REUSEADDR alone; Unix needs SO_REUSEPORT too.
 #ifndef _WIN32
-    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return servers;
-    int yes = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof(yes));
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, lan_option(&yes), static_cast<int>(sizeof(yes)));
+#endif
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_ANY);
     address.sin_port = htons(discovery_port);
-    if (::bind(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) < 0) {
-        ::close(fd);
+    if (::bind(fd, reinterpret_cast<sockaddr *>(&address), static_cast<int>(sizeof(address))) != 0) {
+        lan_socket_close(fd);
         return servers;
     }
+#ifdef _WIN32
+    const DWORD timeout = 100; // milliseconds, so the loop notices the deadline
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, lan_option(&timeout), static_cast<int>(sizeof(timeout)));
+#else
     timeval timeout{0, 100'000}; // 100 ms, so the loop notices the deadline
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, lan_option(&timeout), static_cast<int>(sizeof(timeout)));
+#endif
 
     const auto started = now_us();
     const auto deadline = started + static_cast<std::uint64_t>(wait.count()) * 1000;
@@ -142,8 +136,9 @@ std::vector<LanServer> LanDiscovery::discover(std::chrono::milliseconds wait) {
     while (now_us() < deadline) {
         std::uint8_t buffer[600];
         sockaddr_in from{};
-        socklen_t length = sizeof(from);
-        const auto received = ::recvfrom(fd, buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr *>(&from), &length);
+        LanSockLen length = static_cast<LanSockLen>(sizeof(from));
+        const auto received = ::recvfrom(fd, reinterpret_cast<char *>(buffer), static_cast<int>(sizeof(buffer)), 0,
+                                         reinterpret_cast<sockaddr *>(&from), &length);
         if (received <= 0) continue;
         if (static_cast<std::size_t>(received) < sizeof(magic) + 8) continue;
         if (std::memcmp(buffer, magic, sizeof(magic)) != 0) continue;
@@ -161,9 +156,7 @@ std::vector<LanServer> LanDiscovery::discover(std::chrono::milliseconds wait) {
         found.port = static_cast<std::uint16_t>(buffer[at] | (buffer[at + 1] << 8));
         found.players = static_cast<unsigned>(buffer[at + 2] | (buffer[at + 3] << 8));
         found.max_players = static_cast<unsigned>(buffer[at + 4] | (buffer[at + 5] << 8));
-        char dotted[INET_ADDRSTRLEN]{};
-        ::inet_ntop(AF_INET, &from.sin_addr, dotted, sizeof(dotted));
-        found.address = dotted;
+        found.address = lan_address_text(from);
         found.age = std::chrono::milliseconds(0);
         // One server can answer on several addresses (loopback and its LAN address, say): keep
         // the reachable one, so a LAN party sees one entry per server.
@@ -173,9 +166,8 @@ std::vector<LanServer> LanDiscovery::discover(std::chrono::milliseconds wait) {
             if (loopback || known->second.address.rfind("127.", 0) != 0) continue;
         heard[key] = std::move(found);
     }
-    ::close(fd);
+    lan_socket_close(fd);
     for (auto &[key, server] : heard) servers.push_back(std::move(server));
-#endif
     return servers;
 }
 } // namespace dingosdk::multiplayer

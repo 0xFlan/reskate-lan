@@ -10,7 +10,9 @@ jobs:
   windows:
     # The LAN client is the Windows runtime: ReSkate.dll is what a player's game loads, so this job
     # is the one that produces the half of the pack macOS cannot build.
-    runs-on: windows-latest
+    # windows-latest moved to the Visual Studio 2026 image, which has no VS 2022 for the
+    # `Visual Studio 17 2022` generator; windows-2022 is the image this preset configures on.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - name: Configure

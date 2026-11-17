@@ -40,12 +40,12 @@ class LanTransport final : public Transport {
     std::string relay_status() const override { return "lan"; }
     bool is_lan() const override { return true; }
     std::vector<std::string> take_direct_notes() override;
-    bool set_steam_debug(bool on) override { return false; }
+    bool set_steam_debug(bool) override { return false; }
     bool set_send_rate(int bytes_per_second) override;
     int send_rate() const override { return send_rate_; }
     void set_packing(unsigned milliseconds) override { packing_ms_ = milliseconds; }
-    bool listen_direct(std::uint16_t port) override { return false; }
-    void allow_peers(std::span<const Member> members) override {}
+    bool listen_direct(std::uint16_t) override { return false; }
+    void allow_peers(std::span<const Member>) override {}
     void connect_peer(std::uint64_t) {}
 
     // The port actually bound, for a log line or a join code.

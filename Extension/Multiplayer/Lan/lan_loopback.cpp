@@ -1,9 +1,9 @@
 // A check of the LAN transport with no game and no Steam: one process runs a host and a guest
 // against each other over 127.0.0.1, and asserts the handshake, a reliable message each way, an
 // unreliable one, and a clean disconnect. Built as `lan_loopback` by cmake/Apps.cmake.
+#include "Extension/Multiplayer/Lan/lan_socket.h"
 #include "Extension/Multiplayer/Lan/lan_transport.h"
 
-#include <arpa/inet.h>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
