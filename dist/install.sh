@@ -38,21 +38,25 @@ if [ -z "$TARGET" ] || [ ! -d "$TARGET" ]; then
 fi
 TARGET=$(cd "$TARGET" && pwd)
 
+# The name this platform's runtime goes by. The pack carries a Windows one; on the others only the
+# server is installed, so a Mac or Linux install is never handed a DLL it would never load.
+case "$(uname -s)" in
+    Darwin) runtime="ReSkate.dylib" ;;
+    Linux) runtime="libReSkate.so" ;;
+    *) runtime="ReSkate.dll" ;;
+esac
+
 # Skate 3's recomp has its own folder and its own runtime; patching it would break it silently.
-if [ ! -f "$TARGET/ReSkate.dll" ] && [ ! -f "$TARGET/ReSkateLauncher.exe" ]; then
-    echo "$TARGET has no ReSkate.dll or ReSkateLauncher.exe: that is not a ReSkate (skate.) install." >&2
+if [ ! -f "$TARGET/$runtime" ] && [ ! -f "$TARGET/ReSkateLauncher.exe" ]; then
+    echo "$TARGET has no $runtime or ReSkateLauncher.exe: that is not a ReSkate (skate.) install." >&2
     echo "The Skate 3 recomp is a different project and must not be patched." >&2
     exit 1
 fi
 
 server_src=""
 dll_src=""
-for name in ReSkateServer; do
-    [ -f "$here/bin/$name" ] && server_src="$here/bin/$name"
-done
-for name in ReSkate.dll ReSkate.dylib libReSkate.so; do
-    [ -f "$here/bin/$name" ] && dll_src="$here/bin/$name"
-done
+if [ -f "$here/bin/ReSkateServer" ]; then server_src="$here/bin/ReSkateServer"; fi
+if [ -f "$here/bin/$runtime" ]; then dll_src="$here/bin/$runtime"; fi
 
 echo "ReSkate folder : $TARGET"
 echo "Server binary  : ${server_src:-(missing from bin/)}"
@@ -111,11 +115,18 @@ Everyone who wants to play needs this same pack: stock ReSkate speaks Steam's ne
 build speaks LAN, and the two cannot talk to each other.
 
 On this machine:   LAN/start-server.sh
-                  (the log prints the address to give out)
-On each player:    nothing to do yet: the game's own session still runs on Steam's transport,
-                  so the LAN client is the next piece of work. Hosting works now.
-Mac firewall:      allow incoming UDP 27015 (game) and 27026 (discovery)
+                  (the log prints the address to give out, such as 192.168.1.20:27015)
+On each player:    install this pack over their ReSkate the same way, start the game as usual,
+                  and in its console join the host:
+                      mp lan 192.168.1.20:27015
+                  The port is optional when it is 27015. Steam sessions are untouched: mp host
+                  and mp join still run them exactly as before, and on a LAN session the Steam
+                  lobby and server browser are not used at all.
+Firewall:          allow incoming UDP 27015 (game) and 27026 (discovery)
 HELP
 
 echo "Installed. Start it with: $TARGET/LAN/start-server.sh"
-[ -z "$dll_src" ] && echo "Note: no client runtime in bin/, so this replaces the host only: a player's game still joins over Steam until the LAN client lands." >&2
+if [ -z "$dll_src" ]; then
+    echo "Note: bin/ has no runtime for $(uname -s), so this installs the host only; a player's game" >&2
+    echo "here still joins over Steam. The Windows pack joins with: mp lan <address>." >&2
+fi

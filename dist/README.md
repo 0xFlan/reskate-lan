@@ -10,6 +10,7 @@ joins it over plain UDP, with no accounts, no relay and no internet.
 | `bin/windows/ReSkateServer.exe` | The same server, built by CI for Windows |
 | `bin/windows/start-server.bat` | Starts it there: double-click, or pass options after the name |
 | `bin/ReSkate.dll` | The Windows runtime with the LAN client, built by CI from the same commit |
+| `bin/windows/ReSkateLauncher.exe` | Its launcher, from that same build: copy both into ReSkate's folder |
 | `install.sh` | Finds ReSkate, backs up, copies, writes the launchers |
 | `pack.sh` | Assembles a release zip from a finished build |
 
@@ -30,7 +31,8 @@ LAN: players join this machine on UDP 27015.
 
 ## Joining
 
-Replace the runtime and start the game as usual, then in the console:
+Install `bin/ReSkate.dll` over ReSkate's own (Windows; that is the runtime this pack carries), start
+the game as usual, then in the console:
 
 ```
 mp lan 192.168.1.20:27015
@@ -76,3 +78,6 @@ needs none of this: run the server from `bin/` and leave the game as it is.
 - No peer authentication: anyone who can reach the port can join. Fine on a home LAN, not on a
   shared network.
 - Everyone needs this same build: stock ReSkate speaks Steam's network, this one speaks LAN.
+- The client runtime in this pack is Windows: the fork's runtime only builds with MSVC, and its
+  Windows build is the one CI produces. macOS and Linux machines in this pack host; joining from a
+  real game on those platforms needs a runtime build of their own, which does not exist yet.

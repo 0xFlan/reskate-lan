@@ -29,6 +29,9 @@ win="$out/windows"
 mkdir -p "$win"
 [ -f "$here/windows/start-server.bat" ] && cp "$here/windows/start-server.bat" "$win/start-server.bat"
 [ -f "$build/ReSkateServer.exe" ] && cp "$build/ReSkateServer.exe" "$win/ReSkateServer.exe"
+# The launcher from the same build as the runtime, so a Windows player can replace both and know
+# they match. Neither is needed to host.
+[ -f "$build/ReSkateLauncher.exe" ] && cp "$build/ReSkateLauncher.exe" "$win/ReSkateLauncher.exe"
 
 # ReSkate is GPL-3.0: the zip carries the licence, and the source is the repository it came from.
 cp "$here/../LICENSE" "$here/LICENSE" 2>/dev/null || true
