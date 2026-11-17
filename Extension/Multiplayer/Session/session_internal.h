@@ -8,7 +8,7 @@
 #include "Extension/Customization/developer_board.h"
 #include "Extension/Multiplayer/Remote/native_skater.h"
 #include "Extension/Multiplayer/Voice/voice_chat.h"
-#include "Extension/Multiplayer/Steam/steam_transport.h"
+#include "Extension/Multiplayer/Net/session_transport.h"
 #include "Extension/Throwdowns/throwdown_relay.h"
 #include "Extension/Multiplayer/Steam/steam_lobbies.h"
 #include "Extension/Multiplayer/Steam/steam_server_browser.h"
@@ -229,7 +229,9 @@ struct Session {
     std::string lobby_password, lobby_name;
     std::mutex request_mutex;
     std::deque<std::unique_ptr<PrivateRequest>> requests;
-    SteamTransport transport;
+    // Steam's, unless the session was taken onto the LAN (`mp lan <address>`): the session above
+    // talks to this and does not know which one carried the bytes.
+    SessionTransport transport;
     SteamLobbies lobbies{make_steam_lobby_api(), [](std::uint64_t host) { return banned_host(host) || reskate_banned(host); }};
     SteamServerBrowser servers;
     // When the lobby and server lists were last searched. Every search in the game, asked for

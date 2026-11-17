@@ -286,7 +286,8 @@ endif()
 
 # A loopback check of the LAN transport: a host and a guest in one process, over 127.0.0.1. Built on
 # every platform the transport is, so the Windows sockets are tested where they are not developed.
-add_executable(lan_loopback Extension/Multiplayer/Lan/lan_loopback.cpp Extension/Multiplayer/Lan/lan_transport.cpp)
+add_executable(lan_loopback Extension/Multiplayer/Lan/lan_loopback.cpp Extension/Multiplayer/Lan/lan_transport.cpp
+    Extension/Multiplayer/Lan/lan_client.cpp)
 target_include_directories(lan_loopback PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/External/steam_networking")
 if(WIN32)
     target_link_libraries(lan_loopback PRIVATE ws2_32)

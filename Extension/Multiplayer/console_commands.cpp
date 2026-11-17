@@ -24,6 +24,8 @@ void register_multiplayer_commands(Commands &registry) {
     };
     for (const auto &c : {Command{"host", "Host a Steam lobby for 2-32 players"},
                           Command{"join", "Join using the host's complete session code"},
+                          Command{"lan", "Join a Steam-free LAN server by address, such as 192.168.1.20:27015 "
+                                          "(the LAN server prints its own)"},
                           Command{"browse", "Refresh the public Steam lobby browser"},
                           Command{"join-lobby", "Join a lobby selected in the server browser"},
                           Command{"echo", "Test a delayed remote skater locally"},
@@ -59,6 +61,8 @@ void register_multiplayer_commands(Commands &registry) {
         std::vector<Argument> args;
         if (std::string_view(c.name) == "join")
             args.push_back(argument("join_code"));
+        if (std::string_view(c.name) == "lan")
+            args.push_back(argument("address"));
         if (std::string_view(c.name) == "host") {
             args.push_back(argument("visibility", Type::text, true));
             args.push_back(argument("players", Type::text, true));

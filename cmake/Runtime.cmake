@@ -61,6 +61,9 @@ add_library(dingosdk_runtime SHARED
     Extension/Throwdowns/throwdown_wire.cpp
     Extension/Multiplayer/Hud/native_indicators.cpp
     Extension/Multiplayer/Steam/steam_transport.cpp
+    Extension/Multiplayer/Net/session_transport.cpp
+    Extension/Multiplayer/Lan/lan_transport.cpp
+    Extension/Multiplayer/Lan/lan_client.cpp
     Extension/Multiplayer/Steam/steam_social.cpp
     Extension/Multiplayer/Steam/steam_avatars.cpp
     Extension/Multiplayer/Steam/steam_friend_join.cpp

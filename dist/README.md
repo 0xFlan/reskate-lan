@@ -1,35 +1,7 @@
 # LAN pack
 
-A Steam-free server for ReSkate: one machine hosts on the local network, with no accounts, no
-relay and no internet.
-
-## What works today, and what does not
-
-The **host** half is finished. `ReSkateServer --lan` drops Steam entirely, binds UDP 27015 for play
-and announces itself on UDP 27026, so a LAN party finds the server without being told an address.
-It builds and runs on macOS, Linux and Windows, and the LAN transport under it is tested on all
-three (`lan_loopback`, 27 checks, run in CI).
-
-The **joining** half is not in the game yet. Stock ReSkate builds a session on Steam's transport,
-and so does this fork's runtime so far: `ReSkate.dll` still hands the session a `SteamTransport`, so
-a player's game cannot yet join a LAN server. That wiring is the next piece of work. Until it
-lands, this pack is a host: you can stand a server up with no Steam account, and the transport that
-will carry players is finished and tested underneath it.
-
-## Why this is a pack and not a mod
-
-ReSkate mods carry game data and Lua plugins; ReSkate refuses mods that "ship programs", and the
-plugin sandbox has no sockets — `reskate.net` only carries messages between copies of a plugin.
-The connection itself lives in the runtime and the server, so LAN play has to replace those two
-files. This pack does that, from a folder, with no compiler and no checkout:
-
-```sh
-./install.sh                              # dry run, shows what would change
-./install.sh --apply                      # finds ReSkate and does it
-./install.sh --reskate-dir "$HOME/ReSkate" --apply   # or point at its folder
-```
-
-It backs up everything it replaces into `LAN-backup/`, and `LAN/restore.sh` undoes all of it.
+Steam-free LAN play for ReSkate: one machine hosts on the local network, everyone on that network
+joins it over plain UDP, with no accounts, no relay and no internet.
 
 ## What is in here
 
@@ -37,7 +9,7 @@ It backs up everything it replaces into `LAN-backup/`, and `LAN/restore.sh` undo
 | `bin/ReSkateServer` | The LAN server, for this platform: `--lan`, `--lan-auto`, `--lan-discover` |
 | `bin/windows/ReSkateServer.exe` | The same server, built by CI for Windows |
 | `bin/windows/start-server.bat` | Starts it there: double-click, or pass options after the name |
-| `bin/<runtime>` | The LAN-capable runtime, when this pack was built where one can be built |
+| `bin/ReSkate.dll` | The Windows runtime with the LAN client, built by CI from the same commit |
 | `install.sh` | Finds ReSkate, backs up, copies, writes the launchers |
 | `pack.sh` | Assembles a release zip from a finished build |
 
@@ -50,16 +22,57 @@ bin/ReSkateServer --lan-discover   # list the servers answering on this network
 ```
 
 On Windows, `bin\windows\start-server.bat` runs `--lan-auto` for you. The server needs no game
-install and no Steam: it is the only file you have to run. The log prints the address to hand out.
+install and no Steam: it is the only file you have to run. It prints the address to hand out:
 
-Everyone who will play needs the same build of the fork once the client half lands: stock ReSkate
-speaks Steam's network, this one speaks LAN, and the two cannot be mixed.
+```
+LAN: players join this machine on UDP 27015.
+```
+
+## Joining
+
+Replace the runtime and start the game as usual, then in the console:
+
+```
+mp lan 192.168.1.20:27015
+```
+
+That is the address the host printed (the port is optional when it is 27015). The session then runs
+over the same UDP transport the server runs, and the Steam lobby, server browser and Steam
+networking test are not used at all while it does. `mp browse` says so rather than asking Steam.
+
+Steam remains the default: `mp host`, `mp join` and everything else about a Steam session are
+unchanged. A LAN session is not authenticated — its packets carry a fixed session tag instead of a
+join code's secret, and who sent a message is decided by the address it came from — which is what
+makes joining by address possible at all, and is only fine on a network you trust.
+
+## Installing the runtime
+
+```sh
+./install.sh                              # dry run, shows what would change
+./install.sh --apply                      # finds ReSkate and does it
+./install.sh --reskate-dir "$HOME/ReSkate" --apply   # or point at its folder
+```
+
+It backs everything up into `LAN-backup/`, and `LAN/restore.sh` undoes all of it. Hosting alone
+needs none of this: run the server from `bin/` and leave the game as it is.
+
+## How far this has been tested
+
+- The server and the LAN transport are run on macOS, Linux and Windows in CI: 39 checks over the
+  handshake, both lanes, fragmentation, ordering, two guests at once, idle survival and clean
+  disconnects — plus a smoke test that starts a real server and finds it with `--lan-discover`.
+- The join path is the same code (`LanClient` → `LanTransport`), and the loopback test joins a host
+  through it on all three platforms: fifty reliable messages in each direction in order, an idle
+  period, and a disconnect with its reason.
+- The Windows runtime (`ReSkate.dll`) including the LAN client is compiled by CI under `/W4 /WX`.
+- **Not tested:** joining an actual game on Windows. That needs a Windows machine with skate.
+  installed, and the maintainer of this fork has none. The first real join is the test.
 
 ## Known limits
 
 - UDP 27015 (game) and 27026 (discovery) must be allowed in; macOS asks the first time.
-- The runtime part of the pack only exists for platforms whose runtime builds. The server builds
-  everywhere this repository's CMake does.
-- The host half of the pack is what works; see "What works today" above.
+- A password-protected LAN server cannot be joined from the game yet: `mp lan` takes an address, and
+  the password prompt travels with a join code a LAN session does not use.
 - No peer authentication: anyone who can reach the port can join. Fine on a home LAN, not on a
   shared network.
+- Everyone needs this same build: stock ReSkate speaks Steam's network, this one speaks LAN.

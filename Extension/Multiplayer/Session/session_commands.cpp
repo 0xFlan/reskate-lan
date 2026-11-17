@@ -1,6 +1,8 @@
 #include "session_internal.h"
 #include "Engine/Core/Platform/path_text.h"
 #include "Extension/Multiplayer/Steam/steam_social.h"
+#include "Extension/Multiplayer/Lan/lan_client.h"
+#include "Extension/Multiplayer/Lan/lan_session.h"
 #include "Extension/Multiplayer/Hud/native_indicators.h"
 #include "Extension/Multiplayer/Hud/native_player_ui.h"
 #include "Extension/Multiplayer/Hud/custom_nametags.h"
@@ -984,6 +986,13 @@ std::string command(std::string_view action, std::string_view argument, std::str
             return s.status;
         }
         if (action == "browse") {
+            // The browser and the lobbies are Steam's, and a LAN session asks Steam nothing: it was
+            // given its address, and that is the whole of how it got there.
+            if (s.transport.is_lan()) {
+                s.status = "The server browser is Steam's. A LAN session joins with mp lan <address>.";
+                publish(s);
+                return s.status;
+            }
             if (!s.transport.open())
                 s.status = s.transport.status().detail;
             else if (const auto now = now_us(); take_browse(s, now)) {
@@ -997,6 +1006,11 @@ std::string command(std::string_view action, std::string_view argument, std::str
             return s.lobbies.status().browser;
         }
         if (action == "join-lobby" || action == "join-friend-lobby") {
+            if (s.transport.is_lan()) {
+                s.status = "Steam lobbies are not used on a LAN session. Join with mp lan <address>.";
+                publish(s);
+                return s.status;
+            }
             // A guest can hop straight to a server or lobby they pick in the browser: they leave
             // this one first. A host ends everyone's session by leaving, so they end it themselves;
             // and a Steam friend's join offer, which can arrive unasked, never replaces a session.
@@ -1047,8 +1061,50 @@ std::string command(std::string_view action, std::string_view argument, std::str
             return s.lobbies.status().browser;
         }
         if (action == "test") {
-            s.transport.socket_test();
+            // Steam's networking test is for a Steam session; a LAN one reports its own transport.
+            if (!s.transport.is_lan()) s.transport.socket_test();
             s.status = s.transport.status().detail;
+            publish(s);
+            return s.status;
+        }
+        // "lan <address>[:port]": join the Steam-free LAN server this fork runs, over plain UDP. This
+        // is the LAN client's whole entry point, and it asks Steam for nothing at all.
+        if (action == "lan") {
+            const auto refuse_lan = [&s](const std::string &reason) {
+                s.status = reason;
+                publish(s);
+                return s.status;
+            };
+            std::uint32_t ip{};
+            std::uint16_t port{};
+            std::string error;
+            // Checked before the session is ended for it, so a typo costs nothing.
+            if (!LanClient::parse_endpoint(argument, ip, port, error)) return refuse_lan(error);
+            if (s.mode != Mode::off) return refuse_lan("Leave your current session before joining a LAN server.");
+            stop(s, "Joining a LAN server...");
+            const auto local = steam_social_snapshot() ? steam_social_snapshot()->local.name : std::string{};
+            if (!s.transport.use_lan(local, argument, error)) return refuse_lan(error);
+            s.chat.clear();
+            s.tps = multiplayer_default_tps;
+            s.capacity = multiplayer_lobby_player_limit;
+            s.epoch = nonce();
+            // A LAN session carries a fixed tag rather than a join code's secret (Lan/lan_session.h).
+            s.secret = lan_session_secret;
+            erase_key(s.password);
+            s.mode = Mode::join;
+            s.host_id = 1; // a LAN transport's host is peer 1, whichever player numbers it handed out
+            s.rejoin.reset();
+            s.map_need.reset();
+            // Wait for the host's initial policy, as any guest does.
+            apply_object_placement(s, ObjectPlacement::nobody);
+            s.world = 0;
+            s.awaiting_map = true;
+            s.join_started = now_us();
+            s.map_fetch_deadline = 0;
+            map_fetch_deadline_flag.store(0);
+            set_lobby_park_mode(true, true);
+            set_lobby_object_guest(true);
+            s.status = "Connecting to the LAN server at " + std::string(argument) + "...";
             publish(s);
             return s.status;
         }
@@ -1155,7 +1211,7 @@ std::string command(std::string_view action, std::string_view argument, std::str
             if (s.lobby_name.empty()) s.lobby_name = "ReSkate session";
             s.invite = format_invite({s.host_id, s.secret});
             s.public_host = visibility == "public";
-            if (s.public_host)
+            if (s.public_host && !s.transport.is_lan())
                 s.lobbies.host(s.invite, capacity, s.password.has_value(), s.lobby_name);
             // Remember this setup, and bring back the host options chosen last time.
             remembered.public_lobby = s.public_host;

@@ -3,6 +3,7 @@
 // unreliable one, and a clean disconnect. Built as `lan_loopback` by cmake/Apps.cmake.
 #include "Extension/Multiplayer/Lan/lan_socket.h"
 #include "Extension/Multiplayer/Lan/lan_transport.h"
+#include "Extension/Multiplayer/Lan/lan_client.h"
 
 #include <chrono>
 #include <cstdio>
@@ -199,6 +200,87 @@ int main() {
     check(!guest.take_closed(1).empty(), "guest was told why the host closed it");
     host.disconnect(second_id, "closing");
     check(host.status().peers.empty(), "host dropped both peers");
+
+    // The client the session uses. LanClient reads what a player types and dials it with the same
+    // transport the hosts above run: this is `mp lan <address>`, the whole of the LAN join path.
+    LanTransport server2("Server");
+    check(server2.open(0) && server2.host(4), "a host starts for the client path");
+    const auto endpoint = "127.0.0.1:" + std::to_string(server2.port());
+
+    std::uint32_t parsed_ip{};
+    std::uint16_t parsed_port{};
+    std::string parse_error;
+    check(LanClient::parse_endpoint(endpoint, parsed_ip, parsed_port, parse_error) && parsed_port == server2.port(),
+          "the client reads an address and port out of what a player types");
+    check(!LanClient::parse_endpoint("192.168.1.20:0", parsed_ip, parsed_port, parse_error) && !parse_error.empty(),
+          "a port of zero is refused, with a reason");
+    check(!LanClient::parse_endpoint("localhost:27015", parsed_ip, parsed_port, parse_error),
+          "a name is refused: a LAN join takes an address");
+
+    LanClient client("Client");
+    check(client.join(endpoint), "the LAN client joins a host by address");
+    bool client_connected = false;
+    std::uint64_t client_peer = 0;
+    for (int i = 0; i < 400 && !client_connected; ++i) {
+        server2.poll();
+        client.transport().poll();
+        client.transport().receive();
+        server2.receive();
+        client_connected = client.transport().status().connected;
+        if (!client_peer && !server2.status().peers.empty()) client_peer = server2.status().peers.front().id;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(client_connected, "the client's handshake completed");
+    check(client_peer != 0, "the host lists the client as a peer");
+
+    // Both directions at once, over the path a session's packets take.
+    for (int i = 0; i < 50; ++i) {
+        const auto up = "client to host " + std::to_string(i);
+        client.transport().send(1, {reinterpret_cast<const std::uint8_t *>(up.data()), up.size()}, true, false,
+                                TrafficLane::control);
+        const auto down = "host to client " + std::to_string(i);
+        server2.send(client_peer, {reinterpret_cast<const std::uint8_t *>(down.data()), down.size()}, true, false,
+                     TrafficLane::control);
+    }
+    std::vector<std::string> went_up, came_down;
+    for (int i = 0; i < 600 && (went_up.size() < 50 || came_down.size() < 50); ++i) {
+        server2.poll();
+        client.transport().poll();
+        for (const auto &message : server2.receive()) went_up.emplace_back(message.bytes.begin(), message.bytes.end());
+        for (const auto &message : client.transport().receive())
+            came_down.emplace_back(message.bytes.begin(), message.bytes.end());
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    bool up_in_order = went_up.size() == 50, down_in_order = came_down.size() == 50;
+    for (std::size_t i = 0; up_in_order && i < went_up.size(); ++i)
+        up_in_order = went_up[i] == "client to host " + std::to_string(i);
+    for (std::size_t i = 0; down_in_order && i < came_down.size(); ++i)
+        down_in_order = came_down[i] == "host to client " + std::to_string(i);
+    check(up_in_order, "fifty reliable messages from the client arrive in order");
+    check(down_in_order, "fifty reliable messages to the client arrive in order");
+
+    // The same idle survival the session relies on: a joined client that says nothing but its pings
+    // is still connected to its host after the peer timeout.
+    const auto client_idle_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(11'000);
+    while (std::chrono::steady_clock::now() < client_idle_until) {
+        server2.poll();
+        client.transport().poll();
+        client.transport().receive();
+        server2.receive();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    check(client.transport().status().connected && server2.status().peers.size() == 1,
+          "an idle client is still connected to its host");
+
+    server2.disconnect(client_peer, "closing");
+    for (int i = 0; i < 200 && client.transport().status().connected; ++i) {
+        client.transport().poll();
+        client.transport().receive();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(!client.transport().status().connected, "the client sees the host close the session");
+    check(!client.transport().take_closed(1).empty(), "the client was told why the host closed it");
+
     std::printf("%s\n", failures ? "LAN loopback: FAILED" : "LAN loopback: all checks passed");
     return failures ? 1 : 0;
 }

@@ -3,6 +3,7 @@
 #include "Extension/Plugins/plugin_wire.h"
 #include "server_text.h"
 #include "Extension/Multiplayer/Net/wire_codec.h"
+#include "Extension/Multiplayer/Lan/lan_session.h"
 #include "Extension/Multiplayer/Net/block_codec.h"
 #include "Extension/Multiplayer/Net/pose_delta.h"
 #include "Extension/Multiplayer/developer_identity.h"
@@ -375,7 +376,9 @@ bool Host::start(std::string &error) {
         log_("Connection: through Steam's relays (\"use_steam_relay\": false lets players connect straight to the server).");
     }
     id_ = transport_.status().local_id;
-    secret_ = nonce();
+    // A LAN session is not authenticated (LAN.md): its packets carry the fixed tag both ends know,
+    // so a player joins by address without a code to read out of this log.
+    secret_ = transport_.is_lan() ? lan_session_secret : nonce();
     epoch_ = nonce();
     world_ = 1;
     map_ = map_hash(map_destination(config_.map));

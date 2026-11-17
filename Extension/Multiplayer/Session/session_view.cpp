@@ -311,24 +311,30 @@ void publish(Session &s, const NativeFrame *local) {
     view.sent_bytes = t.sent_bytes;
     view.raw_sent_bytes = t.raw_sent_bytes;
     view.invite = s.invite;
-    if ((s.mode == Mode::host || s.mode == Mode::join) && s.host_id && s.secret) view.join_code = format_invite({s.host_id, s.secret});
+    // A LAN session has no join code to hand out: the address it was given is how it got there.
+    const bool lan = s.transport.is_lan();
+    if (!lan && (s.mode == Mode::host || s.mode == Mode::join) && s.host_id && s.secret)
+        view.join_code = format_invite({s.host_id, s.secret});
     view.map = s.map_name.empty() ? s.available_map : s.map_name;
     view.local_ready = s.gameplay_ready && !s.available_map.empty();
     const auto &lobby = s.lobbies.status();
     view.public_host = s.public_host;
     view.public_lobby = s.mode == Mode::host ? s.lobbies.hosted_lobby() : s.joined_public_lobby;
     view.lobby_listed = lobby.listed;
-    view.lobby_searching = lobby.searching || s.servers.searching();
+    view.lobby_searching = !lan && (lobby.searching || s.servers.searching());
     view.lobby_joining = lobby.joining;
     view.lobby_searched = lobby.searched;
     view.lobby_status = lobby.hosting;
     view.browser_status = lobby.browser;
     view.browse_ready_us = s.browsed ? s.browsed + multiplayer_browse_interval_us : 0;
     // Dedicated servers first: they are always up and never a stranger's own session.
-    view.lobbies = s.servers.rows();
-    // Looked up as the list is shown: the team's list can arrive, or change, after a server was found.
-    for (auto &server : view.lobbies) server.official = official_server(server.id);
-    view.lobbies.insert(view.lobbies.end(), lobby.rows.begin(), lobby.rows.end());
+    // A LAN session browses nothing: the Steam lists and the team's server list are not read at all.
+    if (!lan) {
+        view.lobbies = s.servers.rows();
+        // Looked up as the list is shown: the team's list can arrive, or change, after a server was found.
+        for (auto &server : view.lobbies) server.official = official_server(server.id);
+        view.lobbies.insert(view.lobbies.end(), lobby.rows.begin(), lobby.rows.end());
+    }
     // Steam friends by the public server or lobby their game says they are in, and every friend in
     // the game for the FRIENDS tab (the snapshot lists those playing first).
     if (const auto social = steam_social_snapshot())
@@ -590,8 +596,8 @@ std::vector<MultiplayerChatCommand> own_chat_commands(const Session &s) {
             }), list.end());
         }
     }
-    return list;
-}
+    return list;
+}
 
 // The plugins' "/" commands (set_plugin_chat_commands, from the plugin host's thread) and the lines
 // typed for them, waiting for take_plugin_chat_commands. The serial goes into the chat view's

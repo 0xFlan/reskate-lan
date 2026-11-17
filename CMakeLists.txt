@@ -319,9 +319,11 @@ if(DINGOSDK_BUILD_MULTIPLAYER_TESTS AND WIN32)
         Extension/Multiplayer/Net/wire_codec.cpp Extension/Multiplayer/Net/delta_codec.cpp
         Extension/Multiplayer/Session/password.cpp Extension/Multiplayer/Session/party_book.cpp
         Extension/Multiplayer/Steam/steam_lobbies.cpp Extension/Multiplayer/Steam/steam_server_browser.cpp
+        Extension/Multiplayer/Net/session_transport.cpp Extension/Multiplayer/Lan/lan_client.cpp
+        Extension/Multiplayer/Lan/lan_transport.cpp
         Extension/Multiplayer/word_lists.cpp Extension/AnimationStudio/anim_core.cpp)
     target_link_libraries(dingosdk_multiplayer_mesh_tests PRIVATE dingosdk_logging dingosdk_launcher_support dingosdk_lz4 dingosdk_zstd bcrypt
-        dingosdk_word_filter dingosdk_json)
+        dingosdk_word_filter dingosdk_json $<$<BOOL:${WIN32}>:ws2_32>)
     add_test(NAME multiplayer_mesh COMMAND dingosdk_multiplayer_mesh_tests)
     add_executable(dingosdk_developer_identity_tests
         Extension/Multiplayer/Test/developer_identity_tests.cpp Extension/Multiplayer/developer_identity.cpp

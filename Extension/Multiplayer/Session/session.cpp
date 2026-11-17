@@ -149,7 +149,8 @@ void stop(Session &s, std::string reason) {
     s.last_client_log = 0;
     erase_key(s.password);
     erase_password(s.lobby_password);
-    s.lobbies.stop();
+    // Steam's lobby is left only when Steam carried the session: a LAN one joined no lobby.
+    if (!s.transport.is_lan()) s.lobbies.stop();
     s.joined_public_lobby = 0;
     s.transport.stop();
     // Slots at or above used_slots were never used, or were reset when they were freed.
@@ -1196,21 +1197,24 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool ready, std::string_vi
             if (dispatch_now - request->queued <= 10000000)
                 command(request->action, request->argument, request->password);
         requests.clear();
-        // Commands start asynchronous lobby timers using the current clock.
-        s.lobbies.tick(now_us());
-        s.servers.tick(now_us());
-        if (const auto lobby = s.lobbies.take_join()) {
-            PrivateRequest input;
-            input.password = s.lobby_password;
-            erase_password(s.lobby_password);
-            if (s.mode == Mode::off) {
-                command("join", lobby->code, input.password);
-                if (s.mode == Mode::join) s.joined_public_lobby = lobby->id;
-            } else
-                s.status = "Lobby join cancelled because the session changed.";
+        // Commands start asynchronous lobby timers using the current clock. A LAN session has none:
+        // Steam's lobbies and browser are left alone entirely, so nothing here waits on Steam.
+        if (!s.transport.is_lan()) {
+            s.lobbies.tick(now_us());
+            s.servers.tick(now_us());
+            if (const auto lobby = s.lobbies.take_join()) {
+                PrivateRequest input;
+                input.password = s.lobby_password;
+                erase_password(s.lobby_password);
+                if (s.mode == Mode::off) {
+                    command("join", lobby->code, input.password);
+                    if (s.mode == Mode::join) s.joined_public_lobby = lobby->id;
+                } else
+                    s.status = "Lobby join cancelled because the session changed.";
+            }
+            if (!s.lobbies.status().joining)
+                erase_password(s.lobby_password);
         }
-        if (!s.lobbies.status().joining)
-            erase_password(s.lobby_password);
         expire_remote_collision(base, now_us());
         if (s.mode == Mode::off) {
             if (!competition_stock_physics()) physics_tuning::release(base);

@@ -13,7 +13,10 @@ UDP protocol, so a LAN party needs no Steam account, no relay and no internet.
 | `Extension/Multiplayer/Lan/lan_transport.{h,cpp}` | The UDP transport: handshake, reliability, ordering |
 | `Extension/Multiplayer/Lan/lan_discovery.{h,cpp}` | Beacons that let a machine find servers on its network |
 | `Extension/Multiplayer/Lan/lan_socket.h` | The only platform-specific part: BSD sockets or WinSock |
-| `Extension/Multiplayer/Lan/lan_loopback.cpp` | Two transports over loopback; every check below |
+| `Extension/Multiplayer/Lan/lan_client.{h,cpp}` | The client: reads an address and dials it with the transport above |
+| `Extension/Multiplayer/Lan/lan_session.h` | The session tag a LAN session carries, and the default port |
+| `Extension/Multiplayer/Net/session_transport.{h,cpp}` | The session's transport: Steam's, or the LAN client's once `mp lan` |
+| `Extension/Multiplayer/Lan/lan_loopback.cpp` | Three transports over loopback; every check below |
 | `Server/main.cpp` | `--lan`, `--lan-auto`, `--lan-discover` |
 
 `SteamTransport` implements the same contract, so the session layer above it is untouched and still
@@ -27,8 +30,24 @@ ReSkateServer --lan-auto               # host unless another LAN server answers
 ReSkateServer --lan-discover           # list servers on this network
 ```
 
-The server binds UDP 27015 for play and sends beacons on UDP 27026. A host prints the address to
-hand out; players see the server in the game's LAN list.
+The server binds UDP 27015 for play and sends beacons on UDP 27026. It prints the address to hand
+out (`LAN: players join this machine on UDP 27015.`).
+
+## Joining from the game
+
+```
+mp lan 192.168.1.20:27015
+```
+
+That is the whole of it: the address the host printed, and the port if it is not 27015. The game
+then runs its session over plain UDP, as the server does. Steam stays the default — nothing about a
+Steam session changes unless `mp lan` is used — and while a session is on the LAN path the Steam
+lobby, the server browser and the Steam networking test are simply not used: `mp browse` says so
+instead of asking Steam anything.
+
+A LAN session is not authenticated. Its packets carry a fixed session tag (`lan_session.h`) rather
+than a join code's secret, so joining needs no code out of band; who a message came from is the
+transport's business, the address it was delivered from.
 
 ## Tests
 
@@ -36,21 +55,27 @@ hand out; players see the server in the game's LAN list.
 cmake --build <build> --target lan_loopback && ./lan_loopback
 ```
 
-Twenty-seven checks cover the handshake, both lanes, peer naming, acknowledgement (a reliable message
+Thirty-nine checks cover the handshake, both lanes, peer naming, acknowledgement (a reliable message
 must be acknowledged rather than resent until the peer drops), messages larger than one datagram
 being split and put back together on both lanes, two guests kept apart by one host, a hundred
 reliable messages arriving in the order they were sent, an idle player not being dropped, clean
-disconnects, and the reason a peer was told why it was closed. The same binary is built and run on
-Windows in CI, so the WinSock path is tested where nobody here develops on it.
+disconnects, and the reason a peer was told why it was closed. The last twelve are the client the
+session uses: `LanClient` reads `address:port` out of what a player types (and refuses a name or a
+port of zero), joins a loopback host, exchanges fifty reliable messages in each direction in order,
+stays connected through the peer timeout while idle, and sees the host's disconnect and its reason.
+The same binary is built and run on Windows in CI, so the WinSock path is tested where nobody here
+develops on it.
 
 ## Limits
 
 - Both ends must run this fork: stock ReSkate speaks Steam's protocol and the two cannot talk.
-- The joining half is not wired into the game yet. The server takes `--lan` on every platform, and
-  `lan_loopback` proves the transport; but the runtime the game loads still builds its session with
-  `SteamTransport` (`Extension/Multiplayer/Session/session_internal.h`), so a player's game cannot
-  yet join over LAN. That wiring is the next piece of work, and it needs a real Windows client to
-  test — the transport below it is finished.
+- The client half is built and loopback-tested, not game-tested. `mp lan` runs the same session
+  code over the LAN transport, and CI compiles the runtime with it on Windows (`/W4 /WX`) and runs
+  the join path on all three platforms — but nobody has joined a real game with it on Windows yet:
+  that needs a Windows machine with skate. installed, which the maintainer of this fork does not
+  have. Treat the first join as a test, not as a shipping claim.
+- A password-protected LAN server cannot be joined from the game yet: `mp lan` takes an address,
+  and the password prompt travels with a join code that a LAN session has no use for.
 - No peer authentication. Anyone who can reach the port can join, which is fine on a home LAN and
   not fine on a shared network.
 - `send_rate` is not enforced: a LAN has no relay to protect, so the transport sends as fast as it is given.
