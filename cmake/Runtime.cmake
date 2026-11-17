@@ -310,7 +310,29 @@ set_target_properties(dingosdk_runtime PROPERTIES OUTPUT_NAME "ReSkate" PREFIX "
 # library is built with the release C runtime.)
 find_program(DINGOSDK_CARGO cargo HINTS "$ENV{USERPROFILE}/.cargo/bin")
 set(dingosdk_spotify_dir "${PROJECT_SOURCE_DIR}/SpotifyHelper")
+# (An import library of the Windows API that the Rust code is linked against, which cargo fetches
+# beside the code that uses it. A machine that has never built this has cargo but not the crate
+# yet, so the glob finds nothing on a clean checkout — a new dev's, or the CI runner's. It used to
+# end the configure there; cargo fetch is asked for the crate instead.)
+set(dingosdk_windows_import)
 if(WIN32 AND DINGOSDK_CARGO AND EXISTS "${dingosdk_spotify_dir}/Cargo.toml")
+    if(DEFINED ENV{CARGO_HOME})
+        set(dingosdk_cargo_home "$ENV{CARGO_HOME}")
+    else()
+        set(dingosdk_cargo_home "$ENV{USERPROFILE}/.cargo")
+    endif()
+    set(dingosdk_windows_import_glob "${dingosdk_cargo_home}/registry/src/*/windows_x86_64_msvc-0.52.*/lib/windows.0.52.0.lib")
+    file(GLOB dingosdk_windows_import "${dingosdk_windows_import_glob}")
+    if(NOT dingosdk_windows_import)
+        execute_process(COMMAND "${DINGOSDK_CARGO}" fetch --manifest-path "${dingosdk_spotify_dir}/Cargo.toml"
+            OUTPUT_QUIET ERROR_QUIET RESULT_VARIABLE dingosdk_cargo_fetch)
+        if(dingosdk_cargo_fetch EQUAL 0)
+            file(GLOB dingosdk_windows_import "${dingosdk_windows_import_glob}")
+        endif()
+    endif()
+endif()
+if(dingosdk_windows_import)
+    list(GET dingosdk_windows_import 0 dingosdk_windows_import)
     set(dingosdk_spotify_lib "${dingosdk_spotify_dir}/target/release/reskate_spotify.lib")
     # Every module of the library (stream.rs changed alone did not rebuild it when only lib.rs was named).
     file(GLOB dingosdk_spotify_sources CONFIGURE_DEPENDS "${dingosdk_spotify_dir}/src/*.rs")
@@ -322,21 +344,15 @@ if(WIN32 AND DINGOSDK_CARGO AND EXISTS "${dingosdk_spotify_dir}/Cargo.toml")
         VERBATIM)
     add_custom_target(dingosdk_spotify_device DEPENDS "${dingosdk_spotify_lib}")
     add_dependencies(dingosdk_runtime dingosdk_spotify_device)
-    # (An import library of the Windows API that the Rust code is linked against, which cargo
-    # has fetched beside the code that uses it.)
-    if(DEFINED ENV{CARGO_HOME})
-        set(dingosdk_cargo_home "$ENV{CARGO_HOME}")
-    else()
-        set(dingosdk_cargo_home "$ENV{USERPROFILE}/.cargo")
-    endif()
-    file(GLOB dingosdk_windows_import "${dingosdk_cargo_home}/registry/src/*/windows_x86_64_msvc-0.52.*/lib/windows.0.52.0.lib")
-    list(GET dingosdk_windows_import 0 dingosdk_windows_import)
     set(dingosdk_spotify_release "$<NOT:$<CONFIG:Debug>>")
     target_compile_definitions(dingosdk_runtime PRIVATE "DINGOSDK_SPOTIFY_DEVICE=${dingosdk_spotify_release}")
     target_link_libraries(dingosdk_runtime PRIVATE
         "$<${dingosdk_spotify_release}:${dingosdk_spotify_lib}>" "$<${dingosdk_spotify_release}:${dingosdk_windows_import}>"
         ntdll advapi32 credui secur32 userenv dbghelp legacy_stdio_definitions)
 else()
+    # No cargo, or it could not fetch the crate: the DLL is built without the Spotify device and
+    # Spotify plays through its own app, which is what a machine without cargo has always got.
+    message(STATUS "Spotify device: not built here (cargo is missing, or it could not fetch the windows crate).")
     target_compile_definitions(dingosdk_runtime PRIVATE DINGOSDK_SPOTIFY_DEVICE=0)
 endif()
 dingosdk_version_info(dingosdk_runtime "ReSkate mod runtime" "ReSkate.dll" VFT_DLL)
